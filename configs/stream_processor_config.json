@@ -1,0 +1,18 @@
+{
+    "default_prompt" : "Turn this into oil on canvas art in style of Wassily Kandinsky.",
+    "default_steps" : 2,
+    "default_seed" : 52,
+    "models_path" : "FLUX.2-klein-4B",
+    "resolution" : {
+        "height" : 256,
+        "width" : 512
+    },
+    "compile_models": true,
+    "interpolation_exp": 2,
+    "use_reference_image": false,
+    "reference_image_path": "assets/kandinsky.png",
+    "reference_image_resolution": {
+        "height" : 256,
+        "width" : 256
+    }
+}

@@ -28,16 +28,40 @@ def main():
     fps = cap.get(cv2.CAP_PROP_FPS)
     delay_ms = int(1000 / fps)
 
+    c = 0
+
+    width = 576
+    height = 320
+    fps = 20.0
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter("output.mp4", fourcc, fps, (width, height))
+
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+
+        c += 1
+        if c == 300:
+            stream_processor.set_prompt(
+                "Turn this image into cyberpunk night street scene, red and blue neon lamps, cinematic ligh, bokeh"
+            )
+
+        if c == 500:
+            stream_processor.set_prompt("This man is wearing calssic suit")
+
+        if c == 700:
+            stream_processor.set_prompt(
+                "The background is now sunny steppe, make the natural light, golden hour, sunset"
+            )
 
         resized_frame = crop_maximal_rectangle(
             frame, resolution["height"], resolution["width"]
         )
         input_tensor.copy_from(resized_frame)
         processed_frame = output_tensor.to_numpy()
+
+        out.write(processed_frame)
 
         cv2.imshow("processed stream", processed_frame)
 
@@ -46,6 +70,7 @@ def main():
 
     stream_processor.stop()
     cap.release()
+    out.release()
     cv2.destroyAllWindows()
 
 

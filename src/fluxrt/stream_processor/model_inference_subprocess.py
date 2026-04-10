@@ -16,6 +16,7 @@ from fluxrt.stream_processor.interpolation_model import IFNet
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
+from fluxrt.stream_processor.update_controller import UpdateController
 
 
 class ModelInferenceSubprocess:
@@ -88,16 +89,28 @@ class ModelInferenceSubprocess:
         if self.config["compile_models"]:
             self.transformer = torch.compile(
                 self.transformer,
-                dynamic=False,
             )
             self.vae = torch.compile(
                 self.vae,
-                dynamic=False,
             )
 
             self.interpolation_model = torch.compile(
                 self.interpolation_model,
             )
+
+        reference_image_seq_len = None
+        if self.config["use_reference_image"]:
+            reference_image_res = self.config["reference_image_resolution"]
+            reference_image_seq_len = (reference_image_res["width"] // 16) * (
+                reference_image_res["height"] // 16
+            )
+
+        self.update_controller = UpdateController(
+            self.height,
+            self.width,
+            compression_ratio=16,
+            reference_image_seq_len=reference_image_seq_len,
+        )
 
         self.pipe = Flux2KleinPipeline(
             scheduler=self.scheduler,
@@ -105,6 +118,8 @@ class ModelInferenceSubprocess:
             text_encoder=self.text_encoder,
             tokenizer=self.tokenizer,
             transformer=self.transformer,
+            update_controller=self.update_controller,
+            subprocess_config=self.config,
         )
         self.pipe.to(device)
 
@@ -116,6 +131,7 @@ class ModelInferenceSubprocess:
             max_sequence_length=512,
             text_encoder_out_layers=(9, 18, 27),
         )
+        self.update_controller.reset_cache()
 
     def init_shared_tensors(self):
         h, w = self.resolution["height"], self.resolution["width"]
@@ -238,7 +254,7 @@ class ModelInferenceSubprocess:
         now = time.time()
         processing_time = now - prev_time
         self.last_processing_time.value = processing_time
-        print("fps", 1 / processing_time)
+        print(f"fps: {(1 / processing_time):.2f}")
         return now
 
     def process_frame_with_pipeline(self, frame):

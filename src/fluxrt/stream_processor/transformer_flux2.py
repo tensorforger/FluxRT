@@ -49,23 +49,36 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 class SpatialCache:
     """
-    Stores all data of per-token, per-layer spatial KV cache.
+    Stores all data of per-token, per-layer KV cache.
     Assumes that batch size is 1.
     Should be independent for different timesteps.
 
     Handles:
-    Model's prediction
+    - Model's prediction
+    - Keys and Values of all blocks:
+        [Text tokens + Sample tokens + Reference image tokens] in this order.
     """
 
     def __init__(
         self,
         image_seq_len: int,
-        output_channels: int,
+        text_seq_len: int = 512,
+        output_channels: int = 128,
+        attention_head_dim: int = 128,
+        num_attention_heads: int = 24,
+        num_layers: int = 5,
+        num_single_layers: int = 20,
         device="cuda",
         dtype=torch.bfloat16,
     ):
         self.image_seq_len = image_seq_len
+        self.text_seq_len = text_seq_len
+        self.full_seq_len = text_seq_len + image_seq_len
         self.output_channels = output_channels
+        self.attention_head_dim = attention_head_dim
+        self.num_attention_heads = num_attention_heads
+        self.num_layers = num_layers
+        self.num_single_layers = num_single_layers
         self.device = device
         self.dtype = dtype
 
@@ -73,16 +86,38 @@ class SpatialCache:
             1, image_seq_len, output_channels, device=device, dtype=dtype
         )
 
-        self.valid = torch.zeros(1, image_seq_len, device=device, dtype=dtype)
+        self.valid = torch.zeros(1, self.full_seq_len, device=device, dtype=dtype)
+
+        def get_empty_cache_tensor():
+            return torch.zeros(
+                1,
+                self.full_seq_len,
+                num_attention_heads,
+                attention_head_dim,
+                device=device,
+                dtype=dtype,
+            )
+
+        self.double_block_keys = []
+        self.double_block_values = []
+        for _ in range(num_layers):
+            self.double_block_keys.append(get_empty_cache_tensor())
+            self.double_block_values.append(get_empty_cache_tensor())
+
+        self.single_block_keys = []
+        self.single_block_values = []
+        for _ in range(num_single_layers):
+            self.single_block_keys.append(get_empty_cache_tensor())
+            self.single_block_values.append(get_empty_cache_tensor())
 
     def preprocess_mask(self, input_mask: torch.Tensor) -> torch.Tensor:
         """
         Should be called on enter of forward before model's logic.
         Adds ones to mask to prevent usage of invalid cache.
         Args:
-            input_mask: binary mask with shape (1, image_seq_len)
+            input_mask: binary mask with shape (1, text_seq_len + image_seq_len)
         Returns
-            mask: binary mask with shape (1, image_seq_len)
+            mask: binary mask with shape (1, text_seq_len + image_seq_len)
         """
         return torch.logical_or(torch.logical_not(self.valid), input_mask)
 
@@ -92,24 +127,146 @@ class SpatialCache:
         """
         Fills the masked prediction with tokens from cache + updates cache.
         Args:
-            mask: binary mask with shape (1, image_seq_len)
+            mask: binary mask with shape (1, text_seq_len + image_seq_len)
             masked_prediction: predictions of model with shape (1, image_seq_len, output_channels).
                 The predictions should be valid for active tokens (mask value = 1) and anything for skip tokens (mask value = 0).
 
         Returns:
             filled_prediction: model's prediction, where skipped tokens are replaced with tokens from cache.
         """
-
-        expanded_mask = mask.unsqueeze(-1).expand(
+        # For prediction cache we only need image part of sequence
+        image_seq_mask = mask[:, self.text_seq_len :]
+        expanded_mask = image_seq_mask.unsqueeze(-1).expand(
             -1, -1, self.output_channels
         )  # (1, image_seq_len, output_channels)
         filled_prediction = torch.where(
             expanded_mask, masked_prediction, self.output_cache
         )
         self.valid = torch.logical_or(self.valid, mask)
-
+        self.text_cache_is_valid = True
         self.output_cache = filled_prediction
+
         return filled_prediction
+
+    def sync_with_kv_cache(
+        self,
+        mask: torch.Tensor,
+        masked_keys: torch.Tensor,
+        masked_values: torch.Tensor,
+        block_id: int,
+        block_type: str,
+    ):
+        """
+        Fills the masked keys and values with cached keys and values from cache + updates cache.
+        Args:
+            mask: binary mask with shape (1, text_seq_len + image_seq_len)
+            masked_keys: keys with shape (1, text_seq_len + image_seq_len, num_attention_heads, attention_head_dim).
+                The keys should be valid for active tokens (mask value = 1) and anything for skip tokens (mask value = 0).
+            masked_values: keys with shape (1, text_seq_len + image_seq_len, num_attention_heads, attention_head_dim).
+                The keys should be valid for active tokens (mask value = 1) and anything for skip tokens (mask value = 0).
+            block_id: index of block, e.g. 0, 1, 2 ... num_layers - 1
+            block_type: string "double" or "single"
+
+        Returns:
+            filled_keys: keys, where skipped tokens are replaced with tokens from cache.
+            filled_valuse: values, where skipped tokens are replaced with tokens from cache.
+        """
+        expanded_mask = (
+            mask.unsqueeze(-1)
+            .unsqueeze(-1)
+            .expand(-1, -1, self.num_attention_heads, self.attention_head_dim)
+        )  # (1, text_seq_len + image_seq_len, num_attention_heads, attention_head_dim)
+
+        if block_type == "single":
+            cached_keys = self.single_block_keys[block_id]
+            cached_values = self.single_block_values[block_id]
+
+        elif block_type == "double":
+            cached_keys = self.double_block_keys[block_id]
+            cached_values = self.double_block_values[block_id]
+
+        filled_keys = torch.where(expanded_mask, masked_keys, cached_keys)
+        filled_values = torch.where(expanded_mask, masked_values, cached_values)
+
+        if block_type == "single":
+            self.single_block_keys[block_id] = filled_keys
+            self.single_block_values[block_id] = filled_values
+
+        elif block_type == "double":
+            self.double_block_keys[block_id] = filled_keys
+            self.double_block_values[block_id] = filled_values
+
+        return filled_keys, filled_values
+
+
+def sparse_mlp_compute(
+    mlp_function,
+    mask: torch.Tensor | None,
+    input_hidden_states: torch.Tensor,
+    output_dims: int,
+):
+    if mask is None:
+        mlp_out = mlp_function(input_hidden_states)
+        return mlp_out
+
+    mlp_out = torch.zeros(
+        1,
+        input_hidden_states.shape[1],
+        output_dims,
+        device=input_hidden_states.device,
+        dtype=input_hidden_states.dtype,
+    )
+
+    seq_mask = mask.squeeze(0)
+    if seq_mask.any():
+        active_idx = seq_mask.nonzero(as_tuple=False).squeeze(-1)
+
+        # Gather -> Compute -> Scatter
+        mlp_active = input_hidden_states.index_select(1, active_idx)
+        mlp_active_out = mlp_function(mlp_active)
+        mlp_out.index_copy_(1, active_idx, mlp_active_out)
+
+    return mlp_out
+
+
+def sparse_attention_compute(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attn_mask,
+    backend,
+    parallel_config,
+    query_mask: torch.Tensor | None = None,
+):
+    if query_mask is None:
+        hidden_states = dispatch_attention_fn(
+            query,
+            key,
+            value,
+            attn_mask=attn_mask,
+            backend=backend,
+            parallel_config=parallel_config,
+        )
+        return hidden_states
+
+    hidden_states = torch.zeros_like(query)
+    seq_mask = query_mask.squeeze(0)
+    if seq_mask.any():
+        active_idx = seq_mask.nonzero(as_tuple=False).squeeze(-1)
+
+        # Gather -> Compute -> Scatter
+        query_active = query.index_select(1, active_idx)
+        hidden_states_active = dispatch_attention_fn(
+            query_active,
+            key,
+            value,
+            attn_mask=attn_mask,
+            backend=backend,
+            parallel_config=parallel_config,
+        )
+        hidden_states.index_copy_(1, active_idx, hidden_states_active)
+
+    return hidden_states
 
 
 @dataclass
@@ -334,18 +491,55 @@ def _blend_single_block_mods(
     return torch.cat(blended, dim=-1)
 
 
-def _get_projections(attn: "Flux2Attention", hidden_states, encoder_hidden_states=None):
-    query = attn.to_q(hidden_states)
-    key = attn.to_k(hidden_states)
-    value = attn.to_v(hidden_states)
+def _get_projections(
+    attn: "Flux2Attention", hidden_states, encoder_hidden_states=None, mask=None
+):
+    text_seq_len = encoder_hidden_states.shape[1]
+    if mask is not None:
+        query = sparse_mlp_compute(
+            attn.to_q, mask[:, text_seq_len:], hidden_states, attn.to_q.out_features
+        )
+        key = sparse_mlp_compute(
+            attn.to_k, mask[:, text_seq_len:], hidden_states, attn.to_k.out_features
+        )
+        value = sparse_mlp_compute(
+            attn.to_v, mask[:, text_seq_len:], hidden_states, attn.to_v.out_features
+        )
 
-    encoder_query = encoder_key = encoder_value = None
-    if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
-        encoder_query = attn.add_q_proj(encoder_hidden_states)
-        encoder_key = attn.add_k_proj(encoder_hidden_states)
-        encoder_value = attn.add_v_proj(encoder_hidden_states)
+        encoder_query = encoder_key = encoder_value = None
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_query = sparse_mlp_compute(
+                attn.add_q_proj,
+                mask[:, :text_seq_len],
+                encoder_hidden_states,
+                attn.add_q_proj.out_features,
+            )
+            encoder_key = sparse_mlp_compute(
+                attn.add_k_proj,
+                mask[:, :text_seq_len],
+                encoder_hidden_states,
+                attn.add_k_proj.out_features,
+            )
+            encoder_value = sparse_mlp_compute(
+                attn.add_v_proj,
+                mask[:, :text_seq_len],
+                encoder_hidden_states,
+                attn.add_v_proj.out_features,
+            )
 
-    return query, key, value, encoder_query, encoder_key, encoder_value
+        return query, key, value, encoder_query, encoder_key, encoder_value
+    else:
+        query = attn.to_q(hidden_states)
+        key = attn.to_k(hidden_states)
+        value = attn.to_v(hidden_states)
+
+        encoder_query = encoder_key = encoder_value = None
+        if encoder_hidden_states is not None and attn.added_kv_proj_dim is not None:
+            encoder_query = attn.add_q_proj(encoder_hidden_states)
+            encoder_key = attn.add_k_proj(encoder_hidden_states)
+            encoder_value = attn.add_v_proj(encoder_hidden_states)
+
+        return query, key, value, encoder_query, encoder_key, encoder_value
 
 
 def _get_fused_projections(
@@ -363,11 +557,11 @@ def _get_fused_projections(
 
 
 def _get_qkv_projections(
-    attn: "Flux2Attention", hidden_states, encoder_hidden_states=None
+    attn: "Flux2Attention", hidden_states, encoder_hidden_states=None, mask=None
 ):
     if attn.fused_projections:
         return _get_fused_projections(attn, hidden_states, encoder_hidden_states)
-    return _get_projections(attn, hidden_states, encoder_hidden_states)
+    return _get_projections(attn, hidden_states, encoder_hidden_states, mask=mask)
 
 
 class Flux2SwiGLU(nn.Module):
@@ -429,9 +623,12 @@ class Flux2AttnProcessor:
         encoder_hidden_states: torch.Tensor = None,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
+        block_id: int = None,
+        spatial_cache: SpatialCache | None = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         query, key, value, encoder_query, encoder_key, encoder_value = (
-            _get_qkv_projections(attn, hidden_states, encoder_hidden_states)
+            _get_qkv_projections(attn, hidden_states, encoder_hidden_states, mask=mask)
         )
 
         query = query.unflatten(-1, (attn.heads, -1))
@@ -457,13 +654,19 @@ class Flux2AttnProcessor:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
-        hidden_states = dispatch_attention_fn(
+        if spatial_cache is not None:
+            key, value = spatial_cache.sync_with_kv_cache(
+                mask, key, value, block_id, block_type="double"
+            )
+
+        hidden_states = sparse_attention_compute(
             query,
             key,
             value,
             attn_mask=attention_mask,
             backend=self._attention_backend,
             parallel_config=self._parallel_config,
+            query_mask=mask,
         )
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
@@ -476,10 +679,33 @@ class Flux2AttnProcessor:
                 ],
                 dim=1,
             )
-            encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
 
-        hidden_states = attn.to_out[0](hidden_states)
-        hidden_states = attn.to_out[1](hidden_states)
+            if mask is not None:
+                encoder_hidden_states = sparse_mlp_compute(
+                    attn.to_add_out,
+                    mask[:, : encoder_hidden_states.shape[1]],
+                    encoder_hidden_states,
+                    attn.to_add_out.out_features,
+                )
+            else:
+                encoder_hidden_states = attn.to_add_out(encoder_hidden_states)
+
+        if mask is not None:
+            hidden_states = sparse_mlp_compute(
+                attn.to_out[0],
+                mask[:, encoder_hidden_states.shape[1] :],
+                hidden_states,
+                hidden_states.shape[2],
+            )
+            hidden_states = sparse_mlp_compute(
+                attn.to_out[1],
+                mask[:, encoder_hidden_states.shape[1] :],
+                hidden_states,
+                hidden_states.shape[2],
+            )
+        else:
+            hidden_states = attn.to_out[0](hidden_states)
+            hidden_states = attn.to_out[1](hidden_states)
 
         if encoder_hidden_states is not None:
             return hidden_states, encoder_hidden_states
@@ -717,9 +943,22 @@ class Flux2ParallelSelfAttnProcessor:
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
         image_rotary_emb: torch.Tensor | None = None,
+        block_id: int = None,
+        spatial_cache: SpatialCache | None = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Parallel in (QKV + MLP in) projection
-        hidden_states = attn.to_qkv_mlp_proj(hidden_states)
+
+        if mask is not None:
+            hidden_states = sparse_mlp_compute(
+                attn.to_qkv_mlp_proj,
+                mask,
+                hidden_states,
+                attn.to_qkv_mlp_proj.out_features,
+            )
+        else:
+            hidden_states = attn.to_qkv_mlp_proj(hidden_states)
+
         qkv, mlp_hidden_states = torch.split(
             hidden_states,
             [3 * attn.inner_dim, attn.mlp_hidden_dim * attn.mlp_mult_factor],
@@ -740,23 +979,43 @@ class Flux2ParallelSelfAttnProcessor:
             query = apply_rotary_emb(query, image_rotary_emb, sequence_dim=1)
             key = apply_rotary_emb(key, image_rotary_emb, sequence_dim=1)
 
-        hidden_states = dispatch_attention_fn(
+        if spatial_cache is not None:
+            key, value = spatial_cache.sync_with_kv_cache(
+                mask, key, value, block_id, block_type="single"
+            )
+
+        hidden_states = sparse_attention_compute(
             query,
             key,
             value,
             attn_mask=attention_mask,
             backend=self._attention_backend,
             parallel_config=self._parallel_config,
+            query_mask=mask,
         )
         hidden_states = hidden_states.flatten(2, 3)
         hidden_states = hidden_states.to(query.dtype)
 
         # Handle the feedforward (FF) logic
-        mlp_hidden_states = attn.mlp_act_fn(mlp_hidden_states)
+        if mask is not None:
+            mlp_out = sparse_mlp_compute(
+                attn.mlp_act_fn,
+                mask,
+                mlp_hidden_states,
+                mlp_hidden_states.shape[2] // 2,
+            )
+        else:
+            mlp_out = attn.mlp_act_fn(mlp_hidden_states)
 
         # Concatenate and parallel output projection
-        hidden_states = torch.cat([hidden_states, mlp_hidden_states], dim=-1)
-        hidden_states = attn.to_out(hidden_states)
+        hidden_states = torch.cat([hidden_states, mlp_out], dim=-1)
+
+        if mask is not None:
+            hidden_states = sparse_mlp_compute(
+                attn.to_out, mask, hidden_states, attn.to_out.out_features
+            )
+        else:
+            hidden_states = attn.to_out(hidden_states)
 
         return hidden_states
 
@@ -1444,9 +1703,18 @@ class Flux2Transformer2DModel(
             populated `Flux2KVCache`.
         """
 
-        if spatial_cache is not None:
+        if mask is not None:
             mask = spatial_cache.preprocess_mask(mask)
         num_txt_tokens = encoder_hidden_states.shape[1]
+
+        if mask is not None:
+            hidden_states = hidden_states * mask[:, num_txt_tokens:].unsqueeze(
+                -1
+            ).expand(-1, -1, 128).to(self.dtype)
+
+            encoder_hidden_states = encoder_hidden_states * mask[
+                :, :num_txt_tokens
+            ].unsqueeze(-1).expand(-1, -1, 7680).to(self.dtype)
 
         # 1. Calculate timestep embedding and modulation parameters
         timestep = timestep.to(hidden_states.dtype) * 1000
@@ -1486,6 +1754,7 @@ class Flux2Transformer2DModel(
             )
 
         # 2. Input projection for image (hidden_states) and conditioning text (encoder_hidden_states)
+
         hidden_states = self.x_embedder(hidden_states)
         encoder_hidden_states = self.context_embedder(encoder_hidden_states)
 
@@ -1501,6 +1770,9 @@ class Flux2Transformer2DModel(
             torch.cat([text_rotary_emb[0], image_rotary_emb[0]], dim=0),
             torch.cat([text_rotary_emb[1], image_rotary_emb[1]], dim=0),
         )
+
+        if joint_attention_kwargs is None:
+            joint_attention_kwargs = {}
 
         # 4. Build joint_attention_kwargs with KV cache info
         if kv_cache_mode == "extract":
@@ -1524,6 +1796,10 @@ class Flux2Transformer2DModel(
         for index_block, block in enumerate(self.transformer_blocks):
             if kv_cache_mode is not None and kv_cache is not None:
                 kv_attn_kwargs["kv_cache"] = kv_cache.get_double(index_block)
+
+            kv_attn_kwargs["block_id"] = index_block
+            kv_attn_kwargs["spatial_cache"] = spatial_cache
+            kv_attn_kwargs["mask"] = mask
 
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = (
@@ -1572,6 +1848,10 @@ class Flux2Transformer2DModel(
             if kv_cache_mode is not None and kv_cache is not None:
                 kv_attn_kwargs_single["kv_cache"] = kv_cache.get_single(index_block)
 
+            kv_attn_kwargs["block_id"] = index_block
+            kv_attn_kwargs["spatial_cache"] = spatial_cache
+            kv_attn_kwargs["mask"] = mask
+
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 hidden_states = self._gradient_checkpointing_func(
                     block,
@@ -1598,7 +1878,15 @@ class Flux2Transformer2DModel(
 
         # 7. Output layers
         hidden_states = self.norm_out(hidden_states, temb)
-        output = self.proj_out(hidden_states)
+        if mask is not None:
+            output = sparse_mlp_compute(
+                self.proj_out,
+                mask[:, encoder_hidden_states.shape[1] :],
+                hidden_states,
+                self.proj_out.out_features,
+            )
+        else:
+            output = self.proj_out(hidden_states)
 
         if spatial_cache is not None:
             output = spatial_cache.sync_with_output_cache(mask, output)

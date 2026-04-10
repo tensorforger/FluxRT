@@ -44,7 +44,7 @@ def profile(message):
     global prev_time
     torch.cuda.synchronize()
     current_time = time.time()
-    print(f"{message} : {(current_time - prev_time):.4f} sec")
+    # print(f"{message} : {(current_time - prev_time):.4f} sec")
     prev_time = current_time
 
 
@@ -222,6 +222,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         tokenizer: Qwen2TokenizerFast,
         transformer: Flux2Transformer2DModel,
         is_distilled: bool = False,
+        update_controller: UpdateController = None,
+        subprocess_config=None,
     ):
         super().__init__()
 
@@ -250,7 +252,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         self.test_cache = {}
         self.spatial_cache = {}  # keys: timesteps, values: SpatialCache objects
-        self.update_controller = UpdateController(256, 512, 16)
+        self.update_controller = update_controller
+
+        self._progress_bar_config = {"disable": True}
+        self.subprocess_config = subprocess_config
 
     @staticmethod
     def _get_qwen3_prompt_embeds(
@@ -932,16 +937,31 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
         # 7. Denoising loop
 
-        mask = self.update_controller.update_and_get_mask(
-            condition_images[0].to(device)
-        )
-        mask_np = mask.to(torch.uint8).permute(1, 2, 0).mul(255).cpu().numpy()
-        print(mask_np.shape)
-        cv2.imshow("out", mask_np)
-        cv2.waitKey(1)
+        mask = None
+        if self.subprocess_config["enable_spatial_cache"]:
+            mask = self.update_controller.update_and_get_mask(
+                condition_images[0].to(device)
+            )
+            # mask_np = mask.to(torch.uint8).permute(1, 2, 0).mul(255).cpu().numpy()
+            # cv2.imshow("out", mask_np)
+            # cv2.waitKey(1)
 
-        mask = mask.reshape(1, 512)
-        mask = torch.cat([mask, torch.ones_like(mask)], dim=-1)
+            mask = mask.reshape(1, mask.shape[1] * mask.shape[2])
+            mask = torch.cat(
+                [
+                    self.update_controller.use_text_mask(),
+                    mask,
+                    mask,
+                ],
+                dim=-1,
+            )
+
+            reference_image_mask = self.update_controller.use_reference_image_mask()
+            if reference_image_mask is not None:
+                mask = torch.cat([mask, reference_image_mask], dim=-1)
+            print(
+                f"recomputing {(mask.float().sum() / mask.shape[1] * 100):.2f}% of tokens"
+            )
 
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
@@ -967,18 +987,15 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 with self.transformer.cache_context("cond"):
                     profile("reset")
 
-                    timestep_key = int(timestep)
-
-                    if timestep_key not in self.spatial_cache:
-                        self.spatial_cache[timestep_key] = SpatialCache(
-                            image_seq_len=1024, output_channels=128
-                        )
-
-                    spatial_cache = self.spatial_cache[timestep_key]
-
-                    # latent_model_input = latent_model_input * mask.unsqueeze(-1).expand(
-                    #    -1, -1, 128
-                    # )
+                    spatial_cache = None
+                    if self.subprocess_config["enable_spatial_cache"]:
+                        timestep_key = int(timestep)
+                        if timestep_key not in self.spatial_cache:
+                            self.spatial_cache[timestep_key] = SpatialCache(
+                                image_seq_len=latent_model_input.shape[1],
+                                output_channels=128,
+                            )
+                        spatial_cache = self.spatial_cache[timestep_key]
 
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)

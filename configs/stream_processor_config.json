@@ -4,13 +4,14 @@
     "default_seed" : 52,
     "models_path" : "FLUX.2-klein-4B",
     "resolution" : {
-        "height" : 256,
-        "width" : 512
+        "height" : 320,
+        "width" : 576
     },
     "compile_models": false,
+    "enable_spatial_cache": true,
     "interpolation_exp": 2,
-    "use_reference_image": false,
-    "reference_image_path": "assets/kandinsky.png",
+    "use_reference_image": true,
+    "reference_image_path": "assets/ref.png",
     "reference_image_resolution": {
         "height" : 256,
         "width" : 256

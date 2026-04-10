@@ -7,7 +7,7 @@
         "height" : 256,
         "width" : 512
     },
-    "compile_models": true,
+    "compile_models": false,
     "interpolation_exp": 2,
     "use_reference_image": false,
     "reference_image_path": "assets/kandinsky.png",

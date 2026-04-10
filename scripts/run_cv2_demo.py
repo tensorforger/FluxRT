@@ -10,9 +10,15 @@ def main():
     input_tensor = stream_processor.get_input_tensor()
     output_tensor = stream_processor.get_output_tensor()
     stream_processor.start()
+    # stream_processor.set_prompt(
+    #     "Turn this image into cyberpunk night street scene, red and blue neon lamps, cinematic ligh, bokeh"
+    # )
+
     stream_processor.set_prompt(
-        "Turn this image into cyberpunk night street scene, red and blue neon lamps, cinematic ligh, bokeh"
+        "Turn this image into oil on canvas art in style of Wassily Kandinsky"
     )
+
+    # stream_processor.set_prompt("This man is wearing a black classic suit")
 
     resolution = stream_processor.get_resolution()
 

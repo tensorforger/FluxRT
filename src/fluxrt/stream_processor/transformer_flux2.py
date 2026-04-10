@@ -47,6 +47,71 @@ from diffusers.models.normalization import AdaLayerNormContinuous
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
+class SpatialCache:
+    """
+    Stores all data of per-token, per-layer spatial KV cache.
+    Assumes that batch size is 1.
+    Should be independent for different timesteps.
+
+    Handles:
+    Model's prediction
+    """
+
+    def __init__(
+        self,
+        image_seq_len: int,
+        output_channels: int,
+        device="cuda",
+        dtype=torch.bfloat16,
+    ):
+        self.image_seq_len = image_seq_len
+        self.output_channels = output_channels
+        self.device = device
+        self.dtype = dtype
+
+        self.output_cache = torch.zeros(
+            1, image_seq_len, output_channels, device=device, dtype=dtype
+        )
+
+        self.valid = torch.zeros(1, image_seq_len, device=device, dtype=dtype)
+
+    def preprocess_mask(self, input_mask: torch.Tensor) -> torch.Tensor:
+        """
+        Should be called on enter of forward before model's logic.
+        Adds ones to mask to prevent usage of invalid cache.
+        Args:
+            input_mask: binary mask with shape (1, image_seq_len)
+        Returns
+            mask: binary mask with shape (1, image_seq_len)
+        """
+        return torch.logical_or(torch.logical_not(self.valid), input_mask)
+
+    def sync_with_output_cache(
+        self, mask: torch.Tensor, masked_prediction: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Fills the masked prediction with tokens from cache + updates cache.
+        Args:
+            mask: binary mask with shape (1, image_seq_len)
+            masked_prediction: predictions of model with shape (1, image_seq_len, output_channels).
+                The predictions should be valid for active tokens (mask value = 1) and anything for skip tokens (mask value = 0).
+
+        Returns:
+            filled_prediction: model's prediction, where skipped tokens are replaced with tokens from cache.
+        """
+
+        expanded_mask = mask.unsqueeze(-1).expand(
+            -1, -1, self.output_channels
+        )  # (1, image_seq_len, output_channels)
+        filled_prediction = torch.where(
+            expanded_mask, masked_prediction, self.output_cache
+        )
+        self.valid = torch.logical_or(self.valid, mask)
+
+        self.output_cache = filled_prediction
+        return filled_prediction
+
+
 @dataclass
 class Flux2Transformer2DModelOutput(BaseOutput):
     """
@@ -1341,6 +1406,8 @@ class Flux2Transformer2DModel(
         kv_cache_mode: str | None = None,
         num_ref_tokens: int = 0,
         ref_fixed_timestep: float = 0.0,
+        spatial_cache: "SpatialCache | None" = None,
+        mask: torch.Tensor = None,
     ) -> torch.Tensor | Flux2Transformer2DModelOutput:
         """
         The [`Flux2Transformer2DModel`] forward method.
@@ -1376,6 +1443,9 @@ class Flux2Transformer2DModel(
             `tuple` where the first element is the sample tensor. When `kv_cache_mode="extract"`, also returns the
             populated `Flux2KVCache`.
         """
+
+        if spatial_cache is not None:
+            mask = spatial_cache.preprocess_mask(mask)
         num_txt_tokens = encoder_hidden_states.shape[1]
 
         # 1. Calculate timestep embedding and modulation parameters
@@ -1529,6 +1599,9 @@ class Flux2Transformer2DModel(
         # 7. Output layers
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
+
+        if spatial_cache is not None:
+            output = spatial_cache.sync_with_output_cache(mask, output)
 
         if kv_cache_mode == "extract":
             if not return_dict:

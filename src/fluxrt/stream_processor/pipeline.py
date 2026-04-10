@@ -30,10 +30,14 @@ from diffusers.pipelines.flux2.image_processor import Flux2ImageProcessor
 from diffusers.pipelines.flux2.pipeline_output import Flux2PipelineOutput
 
 from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
+from fluxrt.stream_processor.transformer_flux2 import SpatialCache
+from fluxrt.stream_processor.update_controller import UpdateController
 
 import time
 
 prev_time = time.time()
+
+import cv2
 
 
 def profile(message):
@@ -245,6 +249,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         self.default_sample_size = 128
 
         self.test_cache = {}
+        self.spatial_cache = {}  # keys: timesteps, values: SpatialCache objects
+        self.update_controller = UpdateController(256, 512, 16)
 
     @staticmethod
     def _get_qwen3_prompt_embeds(
@@ -925,6 +931,18 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         profile("6")
 
         # 7. Denoising loop
+
+        mask = self.update_controller.update_and_get_mask(
+            condition_images[0].to(device)
+        )
+        mask_np = mask.to(torch.uint8).permute(1, 2, 0).mul(255).cpu().numpy()
+        print(mask_np.shape)
+        cv2.imshow("out", mask_np)
+        cv2.waitKey(1)
+
+        mask = mask.reshape(1, 512)
+        mask = torch.cat([mask, torch.ones_like(mask)], dim=-1)
+
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
         self.scheduler.set_begin_index(0)
@@ -949,7 +967,18 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 with self.transformer.cache_context("cond"):
                     profile("reset")
 
-                    print(latent_model_input.shape)
+                    timestep_key = int(timestep)
+
+                    if timestep_key not in self.spatial_cache:
+                        self.spatial_cache[timestep_key] = SpatialCache(
+                            image_seq_len=1024, output_channels=128
+                        )
+
+                    spatial_cache = self.spatial_cache[timestep_key]
+
+                    # latent_model_input = latent_model_input * mask.unsqueeze(-1).expand(
+                    #    -1, -1, 128
+                    # )
 
                     noise_pred = self.transformer(
                         hidden_states=latent_model_input,  # (B, image_seq_len, C)
@@ -960,27 +989,29 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                         img_ids=latent_image_ids,  # B, image_seq_len, 4
                         joint_attention_kwargs=self.attention_kwargs,
                         return_dict=False,
+                        mask=mask,
+                        spatial_cache=spatial_cache,
                     )[0]
                     profile("transformer only")
 
                 noise_pred = noise_pred[:, : latents.size(1), :]
 
-                # if self.do_classifier_free_guidance:
-                #     with self.transformer.cache_context("uncond"):
-                #         neg_noise_pred = self.transformer(
-                #             hidden_states=latent_model_input,
-                #             timestep=timestep / 1000,
-                #             guidance=None,
-                #             encoder_hidden_states=negative_prompt_embeds,
-                #             txt_ids=negative_text_ids,
-                #             img_ids=latent_image_ids,
-                #             joint_attention_kwargs=self._attention_kwargs,
-                #             return_dict=False,
-                #         )[0]
-                #     neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
-                #     noise_pred = neg_noise_pred + guidance_scale * (
-                #         noise_pred - neg_noise_pred
-                #     )
+                if self.do_classifier_free_guidance:
+                    with self.transformer.cache_context("uncond"):
+                        neg_noise_pred = self.transformer(
+                            hidden_states=latent_model_input,
+                            timestep=timestep / 1000,
+                            guidance=None,
+                            encoder_hidden_states=negative_prompt_embeds,
+                            txt_ids=negative_text_ids,
+                            img_ids=latent_image_ids,
+                            joint_attention_kwargs=self._attention_kwargs,
+                            return_dict=False,
+                        )[0]
+                    neg_noise_pred = neg_noise_pred[:, : latents.size(1) :]
+                    noise_pred = neg_noise_pred + guidance_scale * (
+                        noise_pred - neg_noise_pred
+                    )
 
                 # compute the previous noisy sample x_t -> x_t-1
                 latents_dtype = latents.dtype

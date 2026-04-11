@@ -942,7 +942,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             mask = self.update_controller.update_and_get_mask(
                 condition_images[0].to(device)
             )
-            # mask_np = mask.to(torch.uint8).permute(1, 2, 0).mul(255).cpu().numpy()
+            mask_np = mask.to(torch.uint8).permute(1, 2, 0).mul(255).cpu().numpy()
+            mask_np = cv2.resize(
+                mask_np, (576 // 4, 320 // 4), interpolation=cv2.INTER_NEAREST
+            )
             # cv2.imshow("out", mask_np)
             # cv2.waitKey(1)
 

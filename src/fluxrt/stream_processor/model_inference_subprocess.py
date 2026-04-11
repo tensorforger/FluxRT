@@ -165,6 +165,12 @@ class ModelInferenceSubprocess:
             image = cv2.resize(image, (resolution["width"], resolution["height"]))
             self.reference_image = Image.fromarray(image)
 
+        target_fps = self.config.get("target_fps", None)
+        self.target_base_processing_time = None
+        if target_fps is not None:
+            target_base_fps = target_fps / (2**self.interpolation_exp)
+            self.target_base_processing_time = 1 / target_base_fps
+
     def start(self):
         self.running.value = True
         self.process = Process(target=self.process_main)
@@ -209,12 +215,11 @@ class ModelInferenceSubprocess:
         )
         return frame_gpu
 
-    def interpolate_and_send_frames(self, frame):
+    def interpolate_frames(self, frame):
         """
         Takes one new generated frame (torch tensor, RGB, on GPU, float16)
         Interpolates according to interpolation_exp times.
         Batches to [interpolated frames, new frame].
-        Converts and sends this to shared memory.
         """
         if self.previous_frame is None:
             self.previous_frame = frame
@@ -246,15 +251,32 @@ class ModelInferenceSubprocess:
             .cpu()
             .numpy()
         )
-        self.output_batch_shared_tensor.copy_from(frames_cpu[..., ::-1])
-        self.pack_is_ready.value = True
+
         self.previous_frame = frame
 
-    def update_time(self, prev_time):
+        return frames_cpu[..., ::-1]
+
+    def send_frames(self, frames):
+        self.output_batch_shared_tensor.copy_from(frames)
+
+    def sync_fps_and_send(self, prev_time, frames):
         now = time.time()
         processing_time = now - prev_time
+
+        if self.target_base_processing_time is not None:
+            sleep_time = max(0, self.target_base_processing_time - processing_time)
+            time.sleep(sleep_time)
+            now = time.time()
+
+        processing_time = now - prev_time
+
         self.last_processing_time.value = processing_time
-        print(f"fps: {(1 / processing_time):.2f}")
+        self.send_frames(frames)
+        self.pack_is_ready.value = True
+
+        print(
+            f"base fps: {(1 / processing_time):.2f}, interpolated fps: {(1 / processing_time * 2**self.interpolation_exp):.2f}"
+        )
         return now
 
     def process_frame_with_pipeline(self, frame):
@@ -268,7 +290,7 @@ class ModelInferenceSubprocess:
         if self.config["use_reference_image"]:
             reference_list.append(self.reference_image)
 
-        out_image = self.pipe(
+        out = self.pipe(
             prompt_embeds=self.prompt_embeds,
             image=reference_list,
             height=self.resolution["height"],
@@ -279,8 +301,11 @@ class ModelInferenceSubprocess:
             generator=torch.Generator(device=self.device).manual_seed(
                 self.process_state["seed"]
             ),
-        ).images[0]
-        out_image = np.asarray(out_image)
+            output_type="np",
+        )
+        out_image = out.images[0]
+        out_image = out_image * 255
+        out_image = out_image.astype(np.uint8)
         return out_image
 
     def convert_np_to_torch(self, frame):
@@ -303,5 +328,5 @@ class ModelInferenceSubprocess:
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             frame = self.process_frame_with_pipeline(frame)
             frame = self.convert_np_to_torch(frame)
-            self.interpolate_and_send_frames(frame)
-            prev_time = self.update_time(prev_time)
+            frames = self.interpolate_frames(frame)
+            prev_time = self.sync_fps_and_send(prev_time, frames)

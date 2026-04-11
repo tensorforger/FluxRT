@@ -1334,6 +1334,8 @@ class Flux2TransformerBlock(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         joint_attention_kwargs = joint_attention_kwargs or {}
 
+        mask = joint_attention_kwargs.get("mask", None)
+
         # Modulation parameters shape: [1, 1, self.dim]
         (shift_msa, scale_msa, gate_msa), (shift_mlp, scale_mlp, gate_mlp) = (
             Flux2Modulation.split(temb_mod_img, 2)
@@ -1370,7 +1372,17 @@ class Flux2TransformerBlock(nn.Module):
         norm_hidden_states = self.norm2(hidden_states)
         norm_hidden_states = norm_hidden_states * (1 + scale_mlp) + shift_mlp
 
-        ff_output = self.ff(norm_hidden_states)
+        text_seq_len = encoder_hidden_states.shape[1]
+        if mask is not None:
+            ff_output = sparse_mlp_compute(
+                self.ff,
+                mask[:, text_seq_len:],
+                norm_hidden_states,
+                norm_hidden_states.shape[2],
+            )
+        else:
+            ff_output = self.ff(norm_hidden_states)
+
         hidden_states = hidden_states + gate_mlp * ff_output
 
         # Process attention outputs for the text stream (`encoder_hidden_states`).
@@ -1382,7 +1394,15 @@ class Flux2TransformerBlock(nn.Module):
             norm_encoder_hidden_states * (1 + c_scale_mlp) + c_shift_mlp
         )
 
-        context_ff_output = self.ff_context(norm_encoder_hidden_states)
+        if mask is not None:
+            context_ff_output = sparse_mlp_compute(
+                self.ff_context,
+                mask[:, :text_seq_len],
+                norm_encoder_hidden_states,
+                norm_encoder_hidden_states.shape[2],
+            )
+        else:
+            context_ff_output = self.ff_context(norm_encoder_hidden_states)
         encoder_hidden_states = encoder_hidden_states + c_gate_mlp * context_ff_output
         if encoder_hidden_states.dtype == torch.float16:
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
@@ -1708,13 +1728,13 @@ class Flux2Transformer2DModel(
         num_txt_tokens = encoder_hidden_states.shape[1]
 
         if mask is not None:
-            hidden_states = hidden_states * mask[:, num_txt_tokens:].unsqueeze(
-                -1
-            ).expand(-1, -1, 128).to(self.dtype)
+            hidden_states = hidden_states * mask[:, num_txt_tokens:].unsqueeze(-1).to(
+                self.dtype
+            )
 
             encoder_hidden_states = encoder_hidden_states * mask[
                 :, :num_txt_tokens
-            ].unsqueeze(-1).expand(-1, -1, 7680).to(self.dtype)
+            ].unsqueeze(-1).to(self.dtype)
 
         # 1. Calculate timestep embedding and modulation parameters
         timestep = timestep.to(hidden_states.dtype) * 1000

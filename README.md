@@ -2,6 +2,8 @@
 
 > Real-time image editing pipeline powered by the **FLUX.2-klein-4B** model, optimized for consumer GPUs.
 
+![Video description](./demos/main_demo.mp4)
+
 ## Performance Highlights
 
 On a single **NVIDIA RTX 5090**, FluxRT achieves:

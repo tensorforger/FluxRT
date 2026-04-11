@@ -8,7 +8,7 @@
         "width" : 576
     },
     "compile_models": true,
-    "enable_spatial_cache": false,
+    "enable_spatial_cache": true,
     "target_fps":null,
     "interpolation_exp": 2,
     "use_reference_image": false,

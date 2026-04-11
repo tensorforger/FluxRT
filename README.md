@@ -1,30 +1,106 @@
 # Flux Real-Time (FluxRT)
 
-> Real-time image editing pipeline powered by the **FLUX.2-klein-4B** model, optimized for consumer GPUs.
-
+Real-time image editing pipeline powered by the **FLUX.2-klein-4B** model, optimized for consumer GPUs.
 
 ![Demo](./demos_gif/main_demo.gif)
 
-
-## Performance Highlights
-
 On a single **NVIDIA RTX 5090**, FluxRT achieves:
 
-| Metric | Value |
-|--------|-------|
-| Resolution | 512×512 |
-| Frame Rate | ~20 FPS *(with interpolation)* |
-| End-to-End Latency | ~0.3 seconds |
+| Metric                 | Value        |
+| ---------------------- | ------------ |
+| **Resolution**         | 512 × 512    |
+| **Frame Rate**         | 25–50 FPS    |
+| **End-to-End Latency** | ~0.3 seconds |
 
 ## How It Works
 
-FluxRT combines several optimization techniques to enable real-time inference:
+FluxRT combines multiple system-level and model-level optimizations to enable real-time inference.
 
-- **Seamless frame interpolation**: Efficient real-time interpolation reduces perceived latency
-- **Multiprocessing & shared memory**: Parallelizes preprocessing, inference, and postprocessing
-- **Model compilation**: All models are pre-compiled for faster execution
+### Spatial Cache
 
-> **Early Development Notice**: This project is actively evolving. Some features may be unstable, and further optimizations are planned. Please [report issues](https://github.com/tensorforger/FluxRT/issues) if you encounter problems!
+Spatial Cache is a custom KV-cache variant tailored for rectified flow models.
+
+FLUX.2 models exhibit highly similar diffusion trajectories across adjacent frames. This temporal coherence allows reuse of intermediate computations between frames. Instead of recomputing all tokens, FluxRT selectively caches and reuses tokens from previous frames.
+
+We initially applied caching to:
+
+* Text tokens
+* Reference image tokens
+
+However, real-world video streams often contain static or slowly changing regions (e.g., backgrounds). FluxRT extends caching to these spatial regions, further reducing per-frame computation.
+
+In practice, only **20–50% of tokens** need to be recomputed per frame.
+
+This results in:
+
+* Higher throughput (FPS)
+* Lower latency
+* Reduced GPU utilization
+
+#### Implementation Details
+
+* Keys and Values are cached **per token, per layer, per diffusion step**
+* Cached values are reused directly in attention layers
+* The model forward pass is patched to skip computation for cached tokens, including:
+
+  * Feed-forward networks (FFN)
+  * Linear projections
+  * Query computation
+  * Attention operations
+
+#### Performance Comparison
+
+Below is a comparison against the baseline (resolution: 576 × 320, 2 inference steps per frame, interpolation ×4):
+
+| Dynamic Area | Baseline (No Cache)                                     | With Spatial Cache                                    |
+| ------------ | ------------------------------------------------------- | ----------------------------------------------------- |
+| Demo         | ![Spatial Cache OFF](./demos_gif/spatial_cache_off.gif) | ![Spatial Cache ON](./demos_gif/spatial_cache_on.gif) |
+| 0–10%        | 20 FPS                                                  | 50 FPS                                                |
+| 50%          | 20 FPS                                                  | 35 FPS                                                |
+| 90–100%      | 20 FPS                                                  | 25 FPS                                                |
+
+> The spatial update mask is shown in the corner:
+> white pixels = recomputed, black pixels = reused.
+
+
+
+### Real-Time Frame Interpolation
+
+To ensure smooth visual transitions, FluxRT integrates real-time frame interpolation using the **RIFE** model.
+It generates intermediate frames between model outputs.
+Interpolation factor is configurable (see `interpolation_exp` in the config)
+This significantly improves perceived motion smoothness without increasing core model latency.
+
+
+### Multiprocessing & Shared Memory
+
+FluxRT uses a multi-process architecture to decouple computation, I/O, and rendering:
+
+* **Main Process**
+
+  * Handles non-blocking input/output
+  * Manages UI and user interaction
+
+* **Inference Process**
+
+  * Runs all models
+  * Executes the generation loop sequentially
+
+* **Output Scheduler Process**
+
+  * Streams interpolated frames
+  * Ensures smooth playback timing
+
+To minimize overhead, inter-process communication uses **shared memory**, enabling near-zero-copy frame transfer and minimal latency.
+
+
+### Model Compilation
+
+All models are compiled using **TorchInductor** to maximize runtime performance.
+
+> **Early Development Notice**
+> This project is actively evolving. Some features may be unstable, and further optimizations are planned.
+> Please report issues: [https://github.com/tensorforger/FluxRT/issues](https://github.com/tensorforger/FluxRT/issues)
 
 
 ## Minimal Example
@@ -79,10 +155,10 @@ if __name__ == "__main__":
 | Component | Requirement |
 |-----------|-------------|
 | **GPU** | NVIDIA RTX 5090 or higher |
-| **VRAM** | 32 GB or more |
+| **VRAM** | 32 GB+ |
 | **RAM** | 64 GB recommended |
 | **Python** | 3.12+ |
-| **CUDA** | 12.8 (or adjust per your setup) |
+| **CUDA** | 12.8+ |
 
 ## Setup Guide
 

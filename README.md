@@ -2,8 +2,13 @@
 
 > Real-time image editing pipeline powered by the **FLUX.2-klein-4B** model, optimized for consumer GPUs.
 
+
+![Demo](./demos_web/main_demo.mp4)
+
+
+
 <video controls width="100%">
-  <source src="./demos/main_demo.mp4" type="video/mp4">
+  <source src="./demos_web/main_demo.mp4" type="video/mp4">
   Your browser does not support the video tag.
 </video>
 

@@ -2,7 +2,7 @@
 
 Real-time image editing pipeline powered by the **FLUX.2-klein-4B** model, optimized for consumer GPUs.
 
-![Demo](./demos_gif/main_demo.gif)
+![Demo](./assets/main_demo.gif)
 
 On a single **NVIDIA RTX 5090**, FluxRT achieves:
 
@@ -54,7 +54,7 @@ Below is a comparison against the baseline (resolution: 576 × 320, 2 inference 
 
 | Dynamic Area | Baseline (No Cache)                                     | With Spatial Cache                                    |
 | ------------ | ------------------------------------------------------- | ----------------------------------------------------- |
-| Demo         | ![Spatial Cache OFF](./demos_gif/spatial_cache_off.gif) | ![Spatial Cache ON](./demos_gif/spatial_cache_on.gif) |
+| Demo         | ![Spatial Cache OFF](./assets/spatial_cache_off.gif)    | ![Spatial Cache ON](./assets/spatial_cache_on.gif)    |
 | 0–10%        | 20 FPS                                                  | 50 FPS                                                |
 | 50%          | 20 FPS                                                  | 35 FPS                                                |
 | 90–100%      | 20 FPS                                                  | 25 FPS                                                |
@@ -236,47 +236,6 @@ cd FluxRT
 conda activate fluxrt
 python scripts/run_cv2_demo.py
 ```
-
-### 5. Run the Web UI Demo *(Experimental)*
-
->  **Under Development**: This feature may be unstable. Use with caution.
-
-FluxRT includes a local Web UI for intuitive prompt editing and device selection. The frontend communicates with the backend via **WebSocket**.
-
-#### Prerequisites
-- [Node.js](https://nodejs.org/en/download) installed
-
-#### Step-by-Step
-
-1. **Build the frontend**
-   ```bash
-   cd FluxRT/web_ui
-   npm install
-   npm run build
-   ```
-
-2. **Install Web UI Python dependencies**
-   ```bash
-   cd FluxRT
-   conda install uvicorn
-   pip install -r requirements_web_ui.txt
-   ```
-
-3. **Start the backend (WebSocket server)**
-   ```bash
-   cd FluxRT
-   conda activate fluxrt
-   python scripts/run_websocket_server.py
-   ```
-
-4. **Start the frontend** *(in a separate terminal)*
-   ```bash
-   cd FluxRT/web_ui
-   npm run start
-   ```
-
-5. **Open in browser**  
-    [`http://localhost:3000`](http://localhost:3000)
 
 ##  Contributing
 

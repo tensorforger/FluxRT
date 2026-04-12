@@ -1,5 +1,5 @@
 .vscode/
-.local_samples/
+local_samples/
 
 # Weights
 interpolation_model/

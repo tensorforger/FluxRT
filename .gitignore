@@ -1,9 +1,10 @@
 .vscode/
+.local_samples/
 
 # Weights
 interpolation_model/
 FLUX.2-klein-4B/
-assets/
+
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

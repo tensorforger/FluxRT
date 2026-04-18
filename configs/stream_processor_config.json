@@ -10,11 +10,5 @@
     "compile_models": true,
     "enable_spatial_cache": true,
     "target_fps":null,
-    "interpolation_exp": 2,
-    "use_reference_image": false,
-    "reference_image_path": "assets/ref.png",
-    "reference_image_resolution": {
-        "height" : 256,
-        "width" : 256
-    }
+    "interpolation_exp": 2
 }

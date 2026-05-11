@@ -44,10 +44,19 @@ class ModelInferenceSubprocess:
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
 
-        manager = Manager()
-        self.command_queue = manager.Queue()
-        self.shared_state = manager.dict()
+        self.manager = Manager()
+        self.command_queue = self.manager.Queue()
+        self.shared_state = self.manager.dict()
+        self.shared_state["generated_frame_count"] = 0
+        self.shared_state["last_processing_time"] = 0.0
+        self.shared_state["cuda_memory"] = self.get_cuda_memory_stats()
+        self.shared_state["benchmark_memory_reset_revision"] = 0
         self.interpolation_exp = self.config.get("interpolation_exp", 1)
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state["manager"] = None
+        return state
 
     def enable_quantization(self):
         """
@@ -241,13 +250,22 @@ class ModelInferenceSubprocess:
         self.process = Process(target=self.process_main)
         self.process.start()
 
-    def stop(self):
+    def stop(self, timeout: float | None = None):
         self.running.value = False
-        if self.process:
-            self.process.join()
+        if self.process and self.process.pid is not None:
+            self.process.join(timeout)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join()
+        if self.manager is not None:
+            self.manager.shutdown()
+            self.manager = None
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
+
+    def reset_benchmark_memory_stats(self, revision: int) -> None:
+        self.command_queue.put(("reset_benchmark_memory_stats", revision))
 
     def set_reference_image(self, image: np.ndarray | None) -> None:
         """
@@ -310,9 +328,29 @@ class ModelInferenceSubprocess:
                         .to(self.update_controller.device)
                     )
                     self.update_controller.set_mask(mask_tensor)
+                elif cmd == "reset_benchmark_memory_stats":
+                    revision = int(payload)
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                        torch.cuda.reset_peak_memory_stats()
+                    self.shared_state["cuda_memory"] = self.get_cuda_memory_stats()
+                    self.shared_state["benchmark_memory_reset_revision"] = revision
 
         except Empty:
             pass
+
+    def get_cuda_memory_stats(self) -> dict:
+        if not torch.cuda.is_available():
+            return {"available": False}
+
+        mb = 1024 * 1024
+        return {
+            "available": True,
+            "allocated_mb": torch.cuda.memory_allocated() / mb,
+            "reserved_mb": torch.cuda.memory_reserved() / mb,
+            "peak_allocated_mb": torch.cuda.max_memory_allocated() / mb,
+            "peak_reserved_mb": torch.cuda.max_memory_reserved() / mb,
+        }
 
     def receive_frame(self):
         """
@@ -385,8 +423,13 @@ class ModelInferenceSubprocess:
         processing_time = now - prev_time
 
         self.last_processing_time.value = processing_time
+        self.shared_state["last_processing_time"] = processing_time
+        self.shared_state["cuda_memory"] = self.get_cuda_memory_stats()
         self.send_frames(frames)
         self.pack_is_ready.value = True
+        self.shared_state["generated_frame_count"] = (
+            int(self.shared_state.get("generated_frame_count", 0)) + 1
+        )
 
         if self.logging:
             print(

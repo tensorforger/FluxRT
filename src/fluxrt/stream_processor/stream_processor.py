@@ -65,9 +65,9 @@ class StreamProcessor:
     def get_output_tensor(self) -> SharedTensor:
         return self.output_shared_tensor
 
-    def stop(self) -> None:
-        self.model_inference_subprocess.stop()
-        self.output_scheduler_subprocess.stop()
+    def stop(self, timeout: float | None = None) -> None:
+        self.model_inference_subprocess.stop(timeout)
+        self.output_scheduler_subprocess.stop(timeout)
         self.input_shared_tensor.close_and_unlink()
         self.output_shared_tensor.close_and_unlink()
         self.output_batch_shared_tensor.close_and_unlink()
@@ -116,3 +116,9 @@ class StreamProcessor:
 
     def enable_quantization(self) -> None:
         self.model_inference_subprocess.enable_quantization()
+
+    def get_benchmark_stats(self) -> dict:
+        return dict(self.model_inference_subprocess.shared_state)
+
+    def reset_benchmark_memory_stats(self, revision: int) -> None:
+        self.model_inference_subprocess.reset_benchmark_memory_stats(revision)

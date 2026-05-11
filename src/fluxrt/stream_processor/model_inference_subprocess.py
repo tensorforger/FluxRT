@@ -257,6 +257,9 @@ class ModelInferenceSubprocess:
             if self.process.is_alive():
                 self.process.terminate()
                 self.process.join()
+        if self.manager is not None:
+            self.manager.shutdown()
+            self.manager = None
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))

@@ -381,7 +381,7 @@ def render_markdown_report(report: dict) -> str:
             f"- max_peak_reserved_mb: {_format_value(summary.get('max_peak_reserved_mb'))}",
             "",
             "## Legacy Latency Probe",
-            f"- legacy_end_to_end_latency_s: {_format_value(legacy_latency.get('legacy_end_to_end_latency_s'))}",
+            f"- legacy_end_to_end_latency_s: {_format_value(legacy_latency.get('legacy_end_to_end_latency_s'), 4)}",
             f"- status: {_format_value(legacy_latency.get('status'))}",
             "",
         ]

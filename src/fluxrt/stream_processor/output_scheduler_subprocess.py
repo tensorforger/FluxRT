@@ -31,13 +31,10 @@ class OutputSchedulerSubprocess:
         self.process = Process(target=self.process_main)
         self.process.start()
 
-    def stop(self, timeout: float | None = None) -> None:
+    def stop(self) -> None:
         self.running.value = False
-        if self.process and self.process.pid is not None:
-            self.process.join(timeout)
-            if self.process.is_alive():
-                self.process.terminate()
-                self.process.join()
+        if self.process:
+            self.process.join()
 
     def process_init(self) -> None:
         """

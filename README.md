@@ -200,20 +200,11 @@ python scripts/process_local_video.py --input input.mp4 --output out.mp4 --promp
 
 ### Run performance benchmark
 
-This generates a unified Markdown benchmark report for the synthetic dynamic-area workload.
-The report includes base FPS, interpolated FPS, interpolation counts, VRAM, selected config metadata, environment information, and the legacy end-to-end latency probe.
+This will show throughput (FPS) with various dynamic area values and end-to-end latency.
+The generated benchmark report will include the current configuration and hardware parameters.
 
 ```bash
-python scripts/run_benchmark.py --no-window --output benchmark_report.md
-```
-
-Base FPS is generated-frame throughput before interpolation. Interpolated FPS applies the configured interpolation multiplier (`2 ** interpolation_exp`), for example `interpolation_exp=1` reports x2 output frames and `interpolation_exp=2` reports x4 output frames.
-
-Useful options:
-
-```bash
-python scripts/run_benchmark.py --config configs/benchmark_config.json --frames 30 --json-output benchmark_report.json
-python scripts/run_benchmark.py --int8 --no-window --output benchmark_report_int8.md
+python scripts/run_benchmark.py
 ```
 
 You can check report generated on my machine in `benchmark_report.txt`

@@ -8,7 +8,9 @@ FLUX.2-klein-4B/
 FLUX.2-klein-4B-int8/
 flux2_4b_koni_animestyle/
 RIFE-safetensors/
-
+LivePortrait/
+LivePortrait-code/
+loras/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -85,6 +87,7 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+output/
 
 # Jupyter Notebook
 .ipynb_checkpoints

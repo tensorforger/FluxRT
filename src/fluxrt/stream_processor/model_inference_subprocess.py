@@ -1,12 +1,10 @@
 import torch
 import time
-import os
 import cv2
 import numpy as np
 import json
 from safetensors.torch import load_file
 from multiprocessing import Process, Value, Manager
-from copy import deepcopy
 from queue import Empty
 from PIL import Image
 
@@ -20,6 +18,7 @@ from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
 from fluxrt.utils.shared_tensor import SharedTensor
 from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
 from fluxrt.stream_processor.update_controller import UpdateController
+from fluxrt.stream_processor.postprocessors import BasePostProcessor, LivePortraitPostProcessor
 
 
 class ModelInferenceSubprocess:
@@ -181,6 +180,12 @@ class ModelInferenceSubprocess:
         if self.config.get("use_lora", False):
             self.pipe.load_lora_weights(self.config.get("lora_weights_path", ""))
 
+        self.lip_processor: BasePostProcessor | None = None
+        self.lip_active = False
+        lp_cfg = self.config.get("lip_transfer", {})
+        if lp_cfg.get("enable", False):
+            self.lip_processor = LivePortraitPostProcessor(models_dir=lp_cfg["models_dir"])
+
     def update_prompt_embeds(self, prompt):
         self.prompt_embeds, text_ids = self.pipe.encode_prompt(
             prompt=prompt,
@@ -274,6 +279,9 @@ class ModelInferenceSubprocess:
             )
         self.command_queue.put(("set_mask", mask))
 
+    def set_lip_transfer(self, enabled: bool) -> None:
+        self.command_queue.put(("set_lip_transfer", enabled))
+
     def update_process_state(self) -> None:
         """
         Called by the internal process
@@ -311,6 +319,9 @@ class ModelInferenceSubprocess:
                         .to(self.update_controller.device)
                     )
                     self.update_controller.set_mask(mask_tensor)
+
+                elif cmd == "set_lip_transfer":
+                    self.lip_active = payload
 
         except Empty:
             pass
@@ -442,8 +453,10 @@ class ModelInferenceSubprocess:
         while self.running.value:
             self.update_process_state()
             frame = self.input_shared_tensor.to_numpy()
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = self.process_frame_with_pipeline(frame)
+            original_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = self.process_frame_with_pipeline(original_frame)
+            if self.lip_processor is not None and self.lip_active:
+                frame = self.lip_processor.process(frame, original_frame)
             frame = self.convert_np_to_torch(frame)
             frames = self.interpolate_frames(frame)
             prev_time = self.sync_fps_and_send(prev_time, frames)

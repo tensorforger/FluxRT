@@ -85,6 +85,8 @@ cd FluxRT
 
 ## 2. Install Dependencies
 
+### Option A: conda
+
 ```bash
 # Create environment
 conda create -n fluxrt python=3.12 pip -y
@@ -96,6 +98,21 @@ pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
 # Install project dependencies
 pip install -r requirements.txt
 pip install -e .
+```
+
+### Option B: uv
+
+```bash
+# Install uv if you don't have it
+pip install uv
+
+# Create environment and install PyTorch with CUDA support
+uv venv --python 3.12
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Install project dependencies
+uv pip install -r requirements.txt
+uv pip install -e .
 ```
 
 **Windows note**: `triton-windows` is required for model compilation. It would be installed automatically on windows, but if you have some issues check [triton-windows compatibility](https://github.com/woct0rdho/triton-windows/issues/158).
@@ -143,6 +160,45 @@ Note that downloading unquantized `FLUX.2-klein-4B` model (previous point) is **
 cd FluxRT
 git clone https://huggingface.co/aydin99/FLUX.2-klein-4B-int8
 ```
+
+### Optional: Lip Transfer (LivePortrait)
+
+Real-time face reenactment that transfers facial expressions from the webcam feed onto the AI-generated output. Requires [LivePortrait](https://github.com/KlingAIResearch/LivePortrait) and its models.
+
+```bash
+git clone https://github.com/KlingAIResearch/LivePortrait LivePortrait-code
+pip install -r requirements_lipsync.txt
+```
+
+Download models from [LivePortrait HuggingFace](https://huggingface.co/KwaiVGI/LivePortrait) and place them as follows:
+
+```text
+FluxRT/
+└── LivePortrait/
+    ├── liveportrait/
+    │   ├── base_models/
+    │   │   ├── appearance_feature_extractor.pth
+    │   │   ├── motion_extractor.pth
+    │   │   ├── spade_generator.pth
+    │   │   └── warping_module.pth
+    │   ├── retargeting_models/
+    │   │   └── stitching_retargeting_module.pth
+    │   └── landmark.onnx
+    └── insightface/
+        └── models/
+            └── buffalo_l/
+```
+
+Add to your config JSON:
+
+```json
+"lip_transfer": {
+    "enable": true,
+    "models_dir": "LivePortrait/liveportrait"
+}
+```
+
+The GUI toggle button will be enabled automatically when this is present in the config. Lip transfer is **off by default** at runtime — toggle it in the GUI as needed.
 
 <details>
 <summary>Required directory structure</summary>

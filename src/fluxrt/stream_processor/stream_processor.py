@@ -114,6 +114,9 @@ class StreamProcessor:
         with self.last_processing_time.get_lock():
             return self.last_processing_time.value
 
+    def set_lip_transfer(self, enabled: bool) -> None:
+        self.model_inference_subprocess.set_lip_transfer(enabled)
+
     def enable_quantization(self) -> None:
         self.model_inference_subprocess.enable_quantization()
 

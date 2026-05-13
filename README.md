@@ -85,6 +85,23 @@ cd FluxRT
 
 ## 2. Install Dependencies
 
+### Option A: uv (recommended)
+
+```bash
+# Install uv if you don't have it
+pip install uv
+
+# Create environment and install PyTorch with CUDA support
+uv venv --python 3.12
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Install project dependencies
+uv pip install -r requirements.txt
+uv pip install -e .
+```
+
+### Option B: conda
+
 ```bash
 # Create environment
 conda create -n fluxrt python=3.12 pip -y
@@ -100,7 +117,57 @@ pip install -e .
 
 **Windows note**: `triton-windows` is required for model compilation. It would be installed automatically on windows, but if you have some issues check [triton-windows compatibility](https://github.com/woct0rdho/triton-windows/issues/158).
 
-## 3. Download Models
+## 3. Optional: Lip Transfer (LivePortrait)
+
+Lip transfer applies real-time facial expression from the webcam feed onto the AI-generated output. Requires [LivePortrait](https://github.com/KlingAIResearch/LivePortrait) and its models.
+
+### Install LivePortrait
+
+```bash
+git clone https://github.com/KlingAIResearch/LivePortrait LivePortrait-code
+```
+
+### Install LivePortrait dependencies
+
+```bash
+pip install -r requirements_lipsync.txt
+```
+
+### Download LivePortrait models
+
+Download models from [LivePortrait HuggingFace](https://huggingface.co/KwaiVGI/LivePortrait) and place them as follows:
+
+```text
+FluxRT/
+└── LivePortrait/
+    ├── liveportrait/
+    │   ├── base_models/
+    │   │   ├── appearance_feature_extractor.pth
+    │   │   ├── motion_extractor.pth
+    │   │   ├── spade_generator.pth
+    │   │   └── warping_module.pth
+    │   ├── retargeting_models/
+    │   │   └── stitching_retargeting_module.pth
+    │   └── landmark.onnx
+    └── insightface/
+        └── models/
+            └── buffalo_l/
+```
+
+### Enable in config
+
+Add to your config JSON:
+
+```json
+"lip_transfer": {
+    "enable": true,
+    "models_dir": "LivePortrait/liveportrait"
+}
+```
+
+The GUI toggle button will be enabled automatically when this is present in the config. Lip transfer is **off by default** at runtime — toggle it in the GUI as needed.
+
+## 4. Download Required Models
 
 Ensure you have git lfs installed or run `git lfs install`
 

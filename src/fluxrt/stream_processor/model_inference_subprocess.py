@@ -1,25 +1,20 @@
-import torch
 import time
-import os
+from multiprocessing import Manager, Process, Value
+from queue import Empty
+
 import cv2
 import numpy as np
-import json
+import torch
 from safetensors.torch import load_file
-from multiprocessing import Process, Value, Manager
-from copy import deepcopy
-from queue import Empty
-from PIL import Image
 
-from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from diffusers.models import AutoencoderKLFlux2
-from transformers import Qwen2TokenizerFast, Qwen3ForCausalLM, AutoConfig
-from accelerate import init_empty_weights
-
+from fluxrt.stream_processor.backends.flux2 import Flux2Backend
 from fluxrt.stream_processor.interpolation_model import IFNet
-from fluxrt.stream_processor.transformer_flux2 import Flux2Transformer2DModel
+from fluxrt.stream_processor.liveportrait_postprocessor import LivePortraitPostProcessor
 from fluxrt.utils.shared_tensor import SharedTensor
-from fluxrt.stream_processor.pipeline import Flux2KleinPipeline
-from fluxrt.stream_processor.update_controller import UpdateController
+
+_BACKENDS = {
+    "flux2": Flux2Backend,
+}
 
 
 class ModelInferenceSubprocess:
@@ -35,26 +30,33 @@ class ModelInferenceSubprocess:
         self.memory_reserved = Value("i", 0)
         self.process = None
         self.config = config
-        self.height = self.config["resolution"]["height"]
-        self.width = self.config["resolution"]["width"]
-        self.resolution = self.config["resolution"]
-        self.prompt = self.config["default_prompt"]
-        self.logging = self.config.get("logging", True)
+        self.height = config["resolution"]["height"]
+        self.width = config["resolution"]["width"]
+        self.resolution = config["resolution"]
+        self.prompt = config["default_prompt"]
+        self.logging = config.get("logging", True)
         self.input_shared_tensor_name = input_shared_tensor_name
         self.output_batch_shared_tensor_name = output_batch_shared_tensor_name
         self.pack_is_ready = pack_is_ready
         self.last_processing_time = last_processing_time
+        self.interpolation_exp = config.get("interpolation_exp", 1)
 
         manager = Manager()
         self.command_queue = manager.Queue()
         self.shared_state = manager.dict()
-        self.interpolation_exp = self.config.get("interpolation_exp", 1)
 
     def enable_quantization(self):
         """
         Should be called before the subprocess is started.
         """
         self.config["enable_int8_quantization"] = True
+
+    def _create_backend(self):
+        name = self.config.get("backend", "flux2")
+        cls = _BACKENDS.get(name)
+        if cls is None:
+            raise ValueError(f"Unknown backend: {name!r}. Available: {list(_BACKENDS)}")
+        return cls()
 
     def init_process_state(self):
         self.device = "cuda"
@@ -64,70 +66,6 @@ class ModelInferenceSubprocess:
             "seed": self.config["default_seed"],
         }
 
-    def load_models_without_quantization(self):
-        device = self.device
-        dtype = torch.bfloat16
-
-        models_path = self.config["models_path"]
-        self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            f"{models_path}/scheduler", local_files_only=True, device=device
-        )
-        self.transformer = Flux2Transformer2DModel.from_pretrained(
-            f"{models_path}/transformer", local_files_only=True, device=device
-        ).to(dtype)
-        self.vae = AutoencoderKLFlux2.from_pretrained(
-            f"{models_path}/vae", local_files_only=True, device=device
-        ).to(dtype)
-        self.text_encoder = Qwen3ForCausalLM.from_pretrained(
-            f"{models_path}/text_encoder", local_files_only=True
-        ).to(device, dtype)
-        self.tokenizer = Qwen2TokenizerFast.from_pretrained(
-            f"{models_path}/tokenizer", local_files_only=True, device=device
-        )
-
-    def load_quantized_models(self):
-        from optimum.quanto import requantize
-        from fluxrt.stream_processor.quantized_flux2 import (
-            QuantizedFlux2Transformer2DModel,
-        )
-
-        device = self.device
-        dtype = torch.bfloat16
-
-        models_path = self.config["models_path"]
-        int8_models_path = self.config["int8_models_path"]
-
-        qtransformer = QuantizedFlux2Transformer2DModel.from_pretrained(
-            int8_models_path, local_files_only=True
-        )
-        qtransformer.to(device=device, dtype=dtype)
-        self.transformer = qtransformer._wrapped
-
-        self.scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-            f"{models_path}/scheduler", local_files_only=True, device=device
-        )
-        self.vae = AutoencoderKLFlux2.from_pretrained(
-            f"{models_path}/vae", local_files_only=True, device=device
-        ).to(device, dtype)
-
-        config = AutoConfig.from_pretrained(
-            f"{int8_models_path}/text_encoder", local_files_only=True
-        )
-        with init_empty_weights():
-            text_encoder = Qwen3ForCausalLM(config)
-
-        with open(f"{int8_models_path}/text_encoder/quanto_qmap.json", "r") as f:
-            qmap = json.load(f)
-        state_dict = load_file(f"{int8_models_path}/text_encoder/model.safetensors")
-        requantize(text_encoder, state_dict=state_dict, quantization_map=qmap)
-        text_encoder.eval()
-        text_encoder.to(device, dtype=dtype)
-        self.text_encoder = text_encoder
-
-        self.tokenizer = Qwen2TokenizerFast.from_pretrained(
-            f"{int8_models_path}/tokenizer", local_files_only=True
-        )
-
     def load_models(self):
         self.interpolation_model = IFNet()
         self.interpolation_model.load_state_dict(
@@ -136,74 +74,28 @@ class ModelInferenceSubprocess:
         self.interpolation_model.to("cuda", dtype=torch.float16)
         self.interpolation_model.eval()
 
-        if self.config.get("enable_int8_quantization", False):
-            self.load_quantized_models()
-        else:
-            self.load_models_without_quantization()
+        self.backend = self._create_backend()
+        self.backend.load(self.config, self.device)
 
         if self.config.get("compile_models", False):
-            self.transformer = torch.compile(
-                self.transformer,
-            )
-            self.vae = torch.compile(
-                self.vae,
-            )
-            self.interpolation_model = torch.compile(
-                self.interpolation_model,
-            )
+            self.backend.compile()
+            self.interpolation_model = torch.compile(self.interpolation_model)
 
-        reference_image_seq_len = None
-        if self.config["use_reference_image"]:
-            reference_image_res = self.config["reference_image_resolution"]
-            reference_image_seq_len = (reference_image_res["width"] // 16) * (
-                reference_image_res["height"] // 16
-            )
-
-        self.update_controller = UpdateController(
-            self.config,
-            self.height,
-            self.width,
-            compression_ratio=16,
-            reference_image_seq_len=reference_image_seq_len,
-        )
-
-        self.pipe = Flux2KleinPipeline(
-            scheduler=self.scheduler,
-            vae=self.vae,
-            text_encoder=self.text_encoder,
-            tokenizer=self.tokenizer,
-            transformer=self.transformer,
-            update_controller=self.update_controller,
-            subprocess_config=self.config,
-        )
-        self.pipe.to(self.device)
-
-        if self.config.get("use_lora", False):
-            self.pipe.load_lora_weights(self.config.get("lora_weights_path", ""))
-
-    def update_prompt_embeds(self, prompt):
-        self.prompt_embeds, text_ids = self.pipe.encode_prompt(
-            prompt=prompt,
-            device=self.device,
-            num_images_per_prompt=1,
-            max_sequence_length=512,
-            text_encoder_out_layers=(9, 18, 27),
-        )
-        self.update_controller.reset_cache()
+        self.lip_processor: LivePortraitPostProcessor | None = None
+        self.lip_active = False
+        lp_cfg = self.config.get("lip_transfer", {})
+        if lp_cfg.get("enable", False):
+            self.lip_processor = LivePortraitPostProcessor(models_dir=lp_cfg["models_dir"])
 
     def init_shared_tensors(self):
         h, w = self.resolution["height"], self.resolution["width"]
-
         self.input_shared_tensor = SharedTensor(
-            (h, w, 3),
-            name=self.input_shared_tensor_name,
+            (h, w, 3), name=self.input_shared_tensor_name
         )
-
         # All interpolated then one original
         output_batch_size = 2**self.interpolation_exp
         self.output_batch_shared_tensor = SharedTensor(
-            (output_batch_size, h, w, 3),
-            name=self.output_batch_shared_tensor_name,
+            (output_batch_size, h, w, 3), name=self.output_batch_shared_tensor_name
         )
 
     def process_init(self):
@@ -213,12 +105,12 @@ class ModelInferenceSubprocess:
         self.init_process_state()
         self.init_shared_tensors()
         self.load_models()
-        self.update_prompt_embeds(self.process_state["prompt"])
+        self.backend.encode_prompt(self.process_state["prompt"])
         self.previous_frame = None
 
         if self.config.get("use_reference_image", False):
+            resolution = self.config["reference_image_resolution"]
             image = cv2.imread(self.config.get("reference_image_path", ""))
-            resolution = self.config.get("reference_image_resolution")
             if image is None:
                 image = np.zeros(
                     (resolution["height"], resolution["width"], 3), dtype=np.uint8
@@ -228,8 +120,7 @@ class ModelInferenceSubprocess:
                 )
             else:
                 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                image = cv2.resize(image, (resolution["width"], resolution["height"]))
-            self.reference_image = Image.fromarray(image)
+            self.backend.set_reference_image(image, resolution)
 
         target_fps = self.config.get("target_fps", None)
         self.target_base_processing_time = None
@@ -239,13 +130,15 @@ class ModelInferenceSubprocess:
 
     def start(self):
         self.running.value = True
-        self.process = Process(target=self.process_main)
+        self.process = Process(target=self.process_main, daemon=True)
         self.process.start()
 
     def stop(self):
         self.running.value = False
         if self.process:
-            self.process.join()
+            self.process.join(timeout=3)
+            if self.process.is_alive():
+                self.process.terminate()
 
     def set_param(self, name: str, value) -> None:
         self.command_queue.put(("set_param", (name, value)))
@@ -274,6 +167,9 @@ class ModelInferenceSubprocess:
             )
         self.command_queue.put(("set_mask", mask))
 
+    def set_lip_transfer(self, enabled: bool) -> None:
+        self.command_queue.put(("set_lip_transfer", enabled))
+
     def update_process_state(self) -> None:
         """
         Called by the internal process
@@ -285,50 +181,20 @@ class ModelInferenceSubprocess:
                     name, value = payload
                     self.process_state[name] = value
                     if name == "prompt":
-                        self.update_prompt_embeds(value)
+                        self.backend.encode_prompt(value)
                 elif cmd == "set_reference_image":
-                    image = payload  # numpy uint8 RGB array or None
                     resolution = self.config["reference_image_resolution"]
-                    if image is not None:
-                        image = cv2.resize(
-                            image, (resolution["width"], resolution["height"])
-                        )
-                        self.reference_image = Image.fromarray(image)
-                    else:
-                        self.reference_image = Image.fromarray(
-                            np.zeros(
-                                (resolution["height"], resolution["width"], 3),
-                                dtype=np.uint8,
-                            )
-                        )
-                    self.update_controller.reset_cache()
-
+                    self.backend.set_reference_image(payload, resolution)
+                elif cmd == "set_lip_transfer":
+                    self.lip_active = payload
                 elif cmd == "set_mask":
-                    mask = payload  # numpy uint8 array of shape (h // compression_ratio, w // compression_ratio)
                     mask_tensor = (
-                        torch.from_numpy(mask)
-                        .unsqueeze(0)
-                        .to(self.update_controller.device)
+                        torch.from_numpy(payload).unsqueeze(0).to(self.device)
                     )
-                    self.update_controller.set_mask(mask_tensor)
+                    self.backend.set_mask(mask_tensor)
 
         except Empty:
             pass
-
-    def receive_frame(self):
-        """
-        Reads frame from input shared memory, converts to RGB float16 GPU tensors.
-        """
-        frame = self.input_shared_tensor.to_numpy()
-        frame_gpu = (
-            torch.from_numpy(frame)
-            .to(self.device)
-            .to(torch.float16)
-            .permute(2, 0, 1)
-            .unsqueeze(0)
-            .div(255)
-        )
-        return frame_gpu
 
     def interpolate_frames(self, frame):
         """
@@ -366,9 +232,7 @@ class ModelInferenceSubprocess:
             .cpu()
             .numpy()
         )
-
         self.previous_frame = frame
-
         return frames_cpu[..., ::-1]
 
     def send_frames(self, frames):
@@ -384,7 +248,6 @@ class ModelInferenceSubprocess:
             now = time.time()
 
         processing_time = now - prev_time
-
         self.last_processing_time.value = processing_time
         self.send_frames(frames)
         self.pack_is_ready.value = True
@@ -392,41 +255,13 @@ class ModelInferenceSubprocess:
 
         if self.logging:
             print(
-                f"base fps: {(1 / processing_time):.2f}, interpolated fps: {(1 / processing_time * 2**self.interpolation_exp):.2f}"
+                f"base fps: {(1 / processing_time):.2f}, "
+                f"interpolated fps: {(1 / processing_time * 2**self.interpolation_exp):.2f}"
             )
         return now
 
-    def process_frame_with_pipeline(self, frame):
-        """
-        Takes frame as np uint8 RGB array
-        Returns frame as np uint8 RGB array
-        """
-        input_frame = Image.fromarray(frame)
-
-        reference_list = [input_frame]
-        if self.config["use_reference_image"]:
-            reference_list.append(self.reference_image)
-
-        out = self.pipe(
-            prompt_embeds=self.prompt_embeds,
-            image=reference_list,
-            height=self.resolution["height"],
-            width=self.resolution["width"],
-            guidance_scale=1.0,
-            num_inference_steps=self.process_state["steps"],
-            num_images_per_prompt=1,
-            generator=torch.Generator(device=self.device).manual_seed(
-                self.process_state["seed"]
-            ),
-            output_type="np",
-        )
-        out_image = out.images[0]
-        out_image = out_image * 255
-        out_image = out_image.astype(np.uint8)
-        return out_image
-
     def convert_np_to_torch(self, frame):
-        frame = (
+        return (
             torch.from_numpy(frame)
             .to(self.device)
             .to(torch.float16)
@@ -434,7 +269,6 @@ class ModelInferenceSubprocess:
             .unsqueeze(0)
             .div(255)
         )
-        return frame
 
     def process_main(self):
         self.process_init()
@@ -442,8 +276,10 @@ class ModelInferenceSubprocess:
         while self.running.value:
             self.update_process_state()
             frame = self.input_shared_tensor.to_numpy()
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = self.process_frame_with_pipeline(frame)
+            original_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = self.backend.process_frame(original_frame, self.process_state)
+            if self.lip_processor is not None and self.lip_active:
+                frame = self.lip_processor.process(frame, original_frame)
             frame = self.convert_np_to_torch(frame)
             frames = self.interpolate_frames(frame)
             prev_time = self.sync_fps_and_send(prev_time, frames)

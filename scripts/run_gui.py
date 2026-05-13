@@ -31,7 +31,12 @@ from fluxrt.utils import crop_maximal_rectangle
 
 POLL_MS = 40
 MAX_CAM_INDEX = 8
-CAM_BACKEND = cv2.CAP_MSMF if platform.system() == "Windows" else cv2.CAP_V4L2
+if platform.system() == "Windows":
+    CAM_BACKEND = cv2.CAP_DSHOW
+    CAM_BACKEND_FALLBACK = cv2.CAP_MSMF
+else:
+    CAM_BACKEND = cv2.CAP_V4L2
+    CAM_BACKEND_FALLBACK = None
 DEFAULT_CONFIG = "configs/config_with_reference.json"
 
 # ── colour tokens ────────────────────────────────────────────────────────────
@@ -61,6 +66,8 @@ def enumerate_cameras() -> list[tuple[int, str]]:
     found = []
     for i in range(MAX_CAM_INDEX):
         cap = cv2.VideoCapture(i, CAM_BACKEND)
+        if not cap.isOpened() and CAM_BACKEND_FALLBACK is not None:
+            cap = cv2.VideoCapture(i, CAM_BACKEND_FALLBACK)
         if cap.isOpened():
             found.append((i, f"Camera {i}"))
             cap.release()
@@ -286,6 +293,8 @@ class MainWindow(QMainWindow):
         self._output_tensor = None
         self._resolution: dict | None = None
         self._use_ref_image = False
+        self._lip_transfer_in_config = False
+        self._lip_active = False
         self._sp_loading = False
         self._cfg_w = 576
         self._cfg_h = 320
@@ -411,6 +420,17 @@ class MainWindow(QMainWindow):
         self._ref_widget.setVisible(False)
         row += 1
 
+        # Lip transfer toggle row
+        lip_row = self._ctrl_row()
+        lip_l = lip_row.layout()
+        self._lip_btn = QPushButton("Enable Lip Transfer")
+        self._lip_btn.setEnabled(False)
+        self._lip_btn.clicked.connect(self._toggle_lip)
+        lip_l.addWidget(self._lip_btn)
+        lip_l.addStretch()
+        ctrl_layout.addWidget(lip_row, row, 0, 1, 3)
+        row += 1
+
         # Action buttons row
         btn_row = self._ctrl_row()
         btn_row.layout().setContentsMargins(0, 4, 0, 0)
@@ -479,13 +499,15 @@ class MainWindow(QMainWindow):
             with open(path) as f:
                 cfg = json.load(f)
             self._use_ref_image = cfg.get("use_reference_image", False)
+            self._lip_transfer_in_config = cfg.get("lip_transfer", {}).get("enable", False)
             res = cfg.get("resolution", {})
             self._cfg_w = res.get("width", 576)
             self._cfg_h = res.get("height", 320)
             log(
-                f"Config loaded: {path}  res={self._cfg_w}x{self._cfg_h}  use_ref={self._use_ref_image}"
+                f"Config loaded: {path}  res={self._cfg_w}x{self._cfg_h}  use_ref={self._use_ref_image}  lip_transfer={self._lip_transfer_in_config}"
             )
             self._ref_widget.setVisible(self._use_ref_image)
+            self._lip_btn.setEnabled(self._lip_transfer_in_config)
             default_prompt = cfg.get("default_prompt", "")
             if default_prompt and not self._prompt_edit.toPlainText().strip():
                 self._prompt_edit.blockSignals(True)
@@ -561,6 +583,15 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             log(f"Reference image load error: {exc}")
 
+    def _toggle_lip(self) -> None:
+        self._lip_active = not self._lip_active
+        self._lip_btn.setText(
+            "Disable Lip Transfer" if self._lip_active else "Enable Lip Transfer"
+        )
+        if self._sp is not None:
+            self._sp.set_lip_transfer(self._lip_active)
+        log(f"Lip transfer: {'on' if self._lip_active else 'off'}")
+
     # ── start / stop ───────────────────────────────────────────────────────────
 
     def _toggle_start(self) -> None:
@@ -613,6 +644,8 @@ class MainWindow(QMainWindow):
             log(f"StreamProcessor ready — resolution={self._resolution}")
             if self._ref_full_path and self._use_ref_image:
                 self._apply_reference(self._ref_full_path)
+            if self._lip_active:
+                sp.set_lip_transfer(True)
             self._sig.launch_capture.emit(cap, cam_idx)
         except Exception as exc:
             log(f"StreamProcessor init error: {exc}")

@@ -995,9 +995,13 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     if self.subprocess_config["enable_spatial_cache"]:
                         timestep_key = int(timestep)
                         if timestep_key not in self.spatial_cache:
+                            tcfg = self.transformer.config
                             self.spatial_cache[timestep_key] = SpatialCache(
                                 image_seq_len=latent_model_input.shape[1],
-                                output_channels=128,
+                                attention_head_dim=tcfg.attention_head_dim,
+                                num_attention_heads=tcfg.num_attention_heads,
+                                num_layers=tcfg.num_layers,
+                                num_single_layers=tcfg.num_single_layers,
                             )
                         spatial_cache = self.spatial_cache[timestep_key]
 

@@ -35,23 +35,34 @@ def get_cpu_name():
 
 
 def get_gpu_info():
-    if not torch.cuda.is_available():
-        return "No CUDA GPU"
-
     gpus = []
+    
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            gpus.append(
+                {
+                    "name": props.name,
+                    "vram_gb": round(props.total_memory / 1024**3, 2),
+                    "cc": f"{props.major}.{props.minor}",
+                }
+            )
+        return gpus
 
-    for i in range(torch.cuda.device_count()):
-        props = torch.cuda.get_device_properties(i)
-
-        gpus.append(
-            {
-                "name": props.name,
-                "vram_gb": round(props.total_memory / 1024**3, 2),
-                "cc": f"{props.major}.{props.minor}",
-            }
-        )
-
-    return gpus
+    elif torch.xpu.is_available():
+        for i in range(torch.xpu.device_count()):
+            props = torch.xpu.get_device_properties(i)
+            gpus.append(
+                {
+                    "name": props.name,
+                    "vram_gb": round(props.total_memory / 1024**3, 2),
+                    "cc": None,
+                }
+            )
+        return gpus
+    
+    else:
+        return "No supported GPU found"
 
 
 def scan_hardware():

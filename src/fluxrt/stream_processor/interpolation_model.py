@@ -4,7 +4,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if torch.cuda.is_available():
+    device = torch.device("cuda")
+elif torch.xpu.is_available():
+    device = torch.device("xpu")
+else:
+    device = torch.device("cpu")
 dtype = torch.float16
 
 

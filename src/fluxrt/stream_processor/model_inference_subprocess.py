@@ -59,7 +59,7 @@ class ModelInferenceSubprocess:
         self.config["enable_int8_quantization"] = True
 
     def init_process_state(self):
-        self.device = "cuda"
+        self.device = self.config.get("device", "cuda")
         self.process_state = {
             "prompt": self.config["default_prompt"],
             "steps": self.config["default_steps"],
@@ -135,7 +135,7 @@ class ModelInferenceSubprocess:
         self.interpolation_model.load_state_dict(
             load_file("RIFE-safetensors/flownet.safetensors")
         )
-        self.interpolation_model.to("cuda", dtype=torch.float16)
+        self.interpolation_model.to(self.device, dtype=torch.float16)
         self.interpolation_model.eval()
 
         if self.config.get("enable_int8_quantization", False):
@@ -167,6 +167,7 @@ class ModelInferenceSubprocess:
             self.width,
             compression_ratio=16,
             reference_image_seq_len=reference_image_seq_len,
+            device=self.device,
         )
 
         self.pipe = Flux2KleinPipeline(
@@ -404,7 +405,10 @@ class ModelInferenceSubprocess:
         self.last_processing_time.value = processing_time
         self.send_frames(frames)
         self.pack_is_ready.value = True
-        self.memory_reserved.value = torch.cuda.memory_reserved() // (1024 * 1024)
+        if self.device == "cuda":
+            self.memory_reserved.value = torch.cuda.memory_reserved() // (1024 * 1024)
+        elif self.device == "xpu":
+            self.memory_reserved.value = torch.xpu.memory_reserved() // (1024 * 1024)
 
         if self.logging:
             print(

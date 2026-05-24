@@ -96,8 +96,11 @@ cd FluxRT
 conda create -n fluxrt python=3.12 pip -y
 conda activate fluxrt
 
-# Install PyTorch with CUDA support (adjust if needed)
+# PyTorch with CUDA support
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# PyTorch with Intel (XPU) support — use this instead of the line above
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
 
 # Install project dependencies
 pip install -r requirements.txt
@@ -110,9 +113,14 @@ pip install -e .
 # Install uv if you don't have it
 pip install uv
 
-# Create environment and install PyTorch with CUDA support
+# Create environment
 uv venv --python 3.12
+
+# PyTorch with CUDA support
 uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# PyTorch with Intel (XPU) support — use this instead of the line above
+# uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
 
 # Install project dependencies
 uv pip install -r requirements.txt
@@ -225,7 +233,14 @@ FluxRT/
 
 ## 4. Run
 
-To enable `int8` quantization you can either add falg `--int8` when running any script or set `enable_int8_quantization` to `true` in  the corresponding config.
+To enable `int8` quantization you can either add flag `--int8` when running any script or set `enable_int8_quantization` to `true` in the corresponding config.
+
+To select the compute device, set `"device"` in the config JSON:
+
+```json
+"device": "cuda"   // NVIDIA GPU (default)
+"device": "xpu"    // Intel GPU
+```
 
 Run any script with conda environment activated:
 

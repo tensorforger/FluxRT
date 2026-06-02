@@ -100,20 +100,24 @@ IF ERRORLEVEL 1 (
     echo [+] Python requirements already installed.
 )
 
-:: ── triton-windows ────────────────────────────────────────────────────────────
-:: Required for model compilation on Windows (auto-installed but explicit here).
-python -c "import triton" >nul 2>&1
-IF ERRORLEVEL 1 (
-    echo [+] Installing triton-windows (required for model compilation^)...
-    "%UV%" pip install triton-windows
-    IF ERRORLEVEL 1 (
-        echo [!] Warning: triton-windows installation failed.
-        echo [!]          Model compilation may not work. Check compatibility at:
-        echo [!]          https://github.com/woct0rdho/triton-windows/issues/158
-    )
-) ELSE (
-    echo [+] triton already installed.
-)
+:: ── triton (Intel XPU backend) ───────────────────────────────────────────────
+:: Intel® XPU Backend for Triton* support for Windows is currently experimental and requires compiling PyTorch and Intel® XPU Backend for Triton* from source.
+:: Follow the Windows build guide:
+:: https://github.com/intel/intel-xpu-backend-for-triton/blob/main/.github/WINDOWS.md
+echo.
+echo ============================================================
+echo WARNING: Triton is required for model compilation
+echo ============================================================
+echo.
+echo     Intel XPU Backend for Triton support on Windows is
+echo     currently experimental and requires compiling PyTorch
+echo     and Intel XPU Backend for Triton from source.
+echo.
+echo     Windows build guide:
+echo     https://github.com/intel/intel-xpu-backend-for-triton/blob/main/.github/WINDOWS.md
+echo.
+echo ============================================================
+echo.
 
 :: ── fluxrt package ────────────────────────────────────────────────────────────
 python -c "from fluxrt import StreamProcessor" >nul 2>&1

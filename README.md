@@ -64,8 +64,9 @@ CUDA **12.8** is recommended.
 git clone https://github.com/tensorforger/FluxRT
 cd FluxRT
 "scripts/install.bat"
-# Intel (XPU) support — to use Intel GPU, replace the CUDA pytorch installation with:
-#   `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu`
+
+# PyTorch with Intel (XPU) support — use this instead of the line above
+# "scripts/install_xpu.bat"
 ```
 
 GUI reqires [OBS](https://obsproject.com/download) to be installed to access virtual webcam. 
@@ -76,8 +77,9 @@ GUI reqires [OBS](https://obsproject.com/download) to be installed to access vir
 git clone https://github.com/tensorforger/FluxRT
 cd FluxRT
 sh scripts/install.sh
-# Intel (XPU) support — to use Intel GPU, replace the CUDA pytorch installation with:
-#   `pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu`
+
+# PyTorch with Intel (XPU) support — use this instead of the line above
+# ./scripts/install_xpu.sh
 ```
 
 GUI reqires **v4l2loopback** to be installed and loaded to access virtual webcam. 

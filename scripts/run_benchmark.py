@@ -111,7 +111,7 @@ def main():
         lines.append("> **Quantization:** int8 enabled via `--int8` flag\n")
 
     lines.append("## Hardware Information\n")
-    hardware_info = scan_hardware()
+    hardware_info = scan_hardware(stream_processor.config.get("device"))
     lines.append("```json")
     lines.append(json.dumps(hardware_info, indent=2, default=str))
     lines.append("```\n")

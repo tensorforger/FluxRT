@@ -42,7 +42,10 @@ import cv2
 
 def profile(message):
     global prev_time
-    torch.cuda.synchronize()
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    elif torch.xpu.is_available():
+        torch.xpu.synchronize()
     current_time = time.time()
     # print(f"{message} : {(current_time - prev_time):.4f} sec")
     prev_time = current_time
@@ -998,6 +1001,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                             self.spatial_cache[timestep_key] = SpatialCache(
                                 image_seq_len=latent_model_input.shape[1],
                                 output_channels=128,
+                                device=latent_model_input.device,
                             )
                         spatial_cache = self.spatial_cache[timestep_key]
 

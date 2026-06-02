@@ -9,6 +9,7 @@
         "width" : 576
     },
     "compile_models": true,
+    "device": "cuda",
     "enable_spatial_cache": true,
     "enable_int8_quantization": false,
     "target_fps":null,

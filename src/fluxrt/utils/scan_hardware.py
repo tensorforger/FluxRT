@@ -34,10 +34,10 @@ def get_cpu_name():
     return platform.processor() or "Unknown CPU"
 
 
-def get_gpu_info():
+def get_gpu_info(device='cuda'):
     gpus = []
     
-    if torch.cuda.is_available():
+    if device == 'cuda' and torch.cuda.is_available():
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
             gpus.append(
@@ -49,7 +49,7 @@ def get_gpu_info():
             )
         return gpus
 
-    elif torch.xpu.is_available():
+    elif device == 'xpu' and torch.xpu.is_available():
         for i in range(torch.xpu.device_count()):
             props = torch.xpu.get_device_properties(i)
             gpus.append(
@@ -65,12 +65,12 @@ def get_gpu_info():
         return "No supported GPU found"
 
 
-def scan_hardware():
+def scan_hardware(device='cuda'):
     info = {
         "platform": platform.platform(),
         "python": platform.python_version(),
         "cpu": get_cpu_name(),
         "cpu_cores_logical": os.cpu_count(),
-        "gpu": get_gpu_info(),
+        "gpu": get_gpu_info(device),
     }
     return info

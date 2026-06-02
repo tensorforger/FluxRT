@@ -19,17 +19,28 @@ IF ERRORLEVEL 1 (
     exit /b 1
 )
 
-where uv >nul 2>&1
-IF ERRORLEVEL 1 (
-    echo [!] 'uv' not found. Attempting to install via PowerShell...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "try { iwr -useb https://astral.sh/uv/install.ps1 | iex } catch { exit 1 }"
-    where uv >nul 2>&1
+SET UV_DIR=thirdparty
+SET UV=%UV_DIR%\uv.exe
+
+IF EXIST "%UV%" (
+    echo [+] uv already present at '%UV%'.
+) ELSE (
+    echo [!] uv not found. Downloading to '%UV_DIR%'...
+    IF NOT EXIST "%UV_DIR%" mkdir "%UV_DIR%"
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$zip = [System.IO.Path]::GetTempFileName() + '.zip';" ^
+        "Invoke-WebRequest -Uri 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip' -OutFile $zip;" ^
+        "Expand-Archive $zip -DestinationPath '%UV_DIR%' -Force;" ^
+        "Remove-Item $zip"
     IF ERRORLEVEL 1 (
-        echo [ERROR] 'uv' is not installed. Install from https://astral.sh/uv and re-run.
+        echo [ERROR] Failed to download uv. Check your internet connection and re-run.
         exit /b 1
     )
-    set "PATH=%USERPROFILE%\.local\bin;%PATH%"
-    echo [+] uv installed successfully.
+    IF NOT EXIST "%UV%" (
+        echo [ERROR] uv.exe not found after extraction. Re-run the script.
+        exit /b 1
+    )
+    echo [+] uv installed successfully to '%UV_DIR%'.
 )
 
 git lfs version >nul 2>&1
@@ -48,8 +59,8 @@ SET VENV_DIR=fluxrt
 IF EXIST "%VENV_DIR%" (
     echo [+] Virtual environment '%VENV_DIR%' already exists.
 ) ELSE (
-    echo [+] Creating virtual environment '%VENV_DIR%' (python=3.12) via uv...
-    uv venv "%VENV_DIR%" --python 3.12
+    echo [+] Creating virtual environment '%VENV_DIR%' with python=3.12 via uv...
+    "%UV%" venv "%VENV_DIR%" --python 3.12
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to create virtual environment via uv.
         exit /b 1
@@ -66,7 +77,7 @@ IF ERRORLEVEL 1 (
 python -c "import torch" >nul 2>&1
 IF ERRORLEVEL 1 (
     echo [+] Installing PyTorch with XPU support...
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
+    "%UV%" pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to install PyTorch.
         exit /b 1
@@ -80,7 +91,7 @@ IF ERRORLEVEL 1 (
 python -c "import diffusers" >nul 2>&1
 IF ERRORLEVEL 1 (
     echo [+] Installing Python requirements from requirements.txt...
-    uv pip install -r requirements.txt
+    "%UV%" pip install -r requirements.txt
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to install requirements.
         exit /b 1
@@ -94,7 +105,7 @@ IF ERRORLEVEL 1 (
 python -c "import triton" >nul 2>&1
 IF ERRORLEVEL 1 (
     echo [+] Installing triton-windows (required for model compilation^)...
-    uv pip install triton-windows
+    "%UV%" pip install triton-windows
     IF ERRORLEVEL 1 (
         echo [!] Warning: triton-windows installation failed.
         echo [!]          Model compilation may not work. Check compatibility at:
@@ -108,7 +119,7 @@ IF ERRORLEVEL 1 (
 python -c "from fluxrt import StreamProcessor" >nul 2>&1
 IF ERRORLEVEL 1 (
     echo [+] Installing fluxrt package in editable mode...
-    uv pip install -e .
+    "%UV%" pip install -e .
     IF ERRORLEVEL 1 (
         echo [ERROR] Failed to install fluxrt package.
         exit /b 1
@@ -190,7 +201,7 @@ echo [+] Installation complete.
 echo [!] Note: the GUI requires OBS to be installed for virtual webcam output.
 echo [!]       Download from https://obsproject.com/download
 echo.
-echo [+] Activate the environment and start:  %VENV_DIR%\Scripts\activate.bat
+echo [+] Activate the environment and start:  .\%VENV_DIR%\Scripts\activate
 echo [+] Then run, for example:               python scripts\run_gradio_demo.py
 
 ENDLOCAL

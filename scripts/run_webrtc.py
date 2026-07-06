@@ -454,6 +454,12 @@ async def offer(request: Request):
     @pc.on("connectionstatechange")
     async def _on_state():
         log.info("PC state: %s", pc.connectionState)
+        # NOTE: aiortc's connectionState is only new/connecting/connected/failed/
+        # closed — it never emits "disconnected" (unlike the browser). "disconnected"
+        # is kept here as a harmless no-op guard; a dead owner whose pc lingers in
+        # "connected" until ICE consent expiry (~30s) is handed off far sooner by
+        # the frame-gap policy in consume_peer_input (owner_gap_should_release),
+        # not by this handler.
         if pc.connectionState in ("failed", "closed", "disconnected"):
             # Cancel the input consumer directly — do NOT rely solely on
             # pc.close() ending the track to make recv() raise. aiortc's

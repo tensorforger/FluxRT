@@ -12,10 +12,16 @@ is imported with a fallback) so the ownership transitions and the recv policy
 are unit-testable with fake tracks and fake peer-connection objects.
 
 recv POLICY (this is the bug class that regressed in c855950):
-- An OWNER is NEVER evicted because of a frame gap. A healthy owner legitimately
-  produces no frame for >5s (first keyframe after claiming, ICE/DTLS/TURN settle,
-  a brief stall, a paused camera). Death is detected out-of-band: the caller's
-  connectionstatechange handler cancels this task when the pc goes terminal.
+- A LONE OWNER is NEVER evicted because of a frame gap. A healthy owner
+  legitimately produces no frame for >5s (first keyframe after claiming,
+  ICE/DTLS/TURN settle, a brief stall, a paused camera). Death is detected
+  out-of-band: the caller's connectionstatechange handler cancels this task when
+  the pc goes terminal.
+- An OWNER WITH A WAITER READY does yield on a gap >= OWNER_GAP_WITH_WAITER
+  (owner_gap_should_release). This is NOT the c855950 blind evict — it fires
+  only when a takeover candidate exists, bounding a dead owner's freeze (abrupt
+  network loss keeps the pc 'connected' until ICE consent expiry ~30s) instead
+  of frozen output while a ready client sits idle.
 - A WAITER is bounded only on its FIRST frame: a peer that never delivers a frame
   AND is not in the 'connected' ICE state is a dead reconnect and is dropped after
   WAITER_FIRST_FRAME_DEADLINE. Once it has delivered a frame, it is never evicted
@@ -46,12 +52,32 @@ TERMINAL_STATES = ("failed", "closed", "disconnected")
 # as a dead reconnect (only if it is also not 'connected').
 WAITER_FIRST_FRAME_DEADLINE = 25.0
 
+# How long an OWNER may receive no frame before it yields the input — but ONLY
+# when another publisher is waiting to take over (see owner_gap_should_release).
+# A dead peer's pc stays 'connected' in aiortc until ICE consent expiry (aioice
+# CONSENT_INTERVAL=5 * CONSENT_FAILURES=6 ≈ 25-35s), which would freeze the input
+# that whole time even though a ready client is queued. This bounds the freeze to
+# ~this gap when a takeover candidate exists.
+OWNER_GAP_WITH_WAITER = 8.0
+
 
 def owner_should_release(connection_state: str) -> bool:
     """An owner is released ONLY on a terminal connection state, never on a frame
     gap. (c855950 evicted on a blind 5s recv timeout regardless of state — that
     froze healthy owners; this is the fix.)"""
     return connection_state in TERMINAL_STATES
+
+
+def owner_gap_should_release(
+    gap_s: float, other_waiters: int, threshold: float = OWNER_GAP_WITH_WAITER
+) -> bool:
+    """An owner yields the input on a receive gap ONLY when (a) the gap is at
+    least `threshold` seconds AND (b) another publisher is waiting to drive. No
+    waiter → the owner keeps the slot regardless of the gap: this is NOT a blind
+    gap-evict (the c855950 regression), it is a handoff to a ready candidate. It
+    bounds a dead owner's freeze (abrupt network loss, pc still 'connected' until
+    ICE consent expiry) to ~threshold when someone can take over."""
+    return other_waiters >= 1 and gap_s >= threshold
 
 
 def waiter_should_evict(
@@ -138,6 +164,13 @@ class InputOwnership:
         with self._lock:
             return len(self._waiters)
 
+    def num_other_waiters(self, pc) -> int:
+        """Count of registered waiters that are NOT `pc` — peers ready to take
+        over if `pc` (the current owner) releases. The owner stays registered in
+        _waiters until release, so this excludes the owner's own slot."""
+        with self._lock:
+            return sum(1 for w in self._waiters.values() if w is not pc)
+
 
 # Type of the frame sink: an async callable that consumes one decoded VideoFrame
 # (the caller offloads decode + pipeline drive to an executor inside it).
@@ -146,13 +179,29 @@ FrameSink = Callable[[object], Awaitable[None]]
 NotifyHook = Callable[..., None]
 
 
-async def _pump_owner_frames(track, pc, sink: FrameSink, log=None) -> None:
+async def _pump_owner_frames(
+    track,
+    pc,
+    sink: FrameSink,
+    ownership: "InputOwnership",
+    *,
+    log=None,
+    gap_release_s: float = OWNER_GAP_WITH_WAITER,
+) -> None:
     """Drain-to-latest: a reader task always overwrites `latest`, the processing
     loop drives only the newest frame. Bounds round-trip lag and memory when the
-    pipeline is slower than the peer camera. The owner reader BLOCKS on recv()
-    with no timeout — a frame gap never evicts a live owner (the caller cancels
-    this task when the pc goes terminal)."""
+    pipeline is slower than the peer camera.
+
+    The owner reader BLOCKS on recv() with no timeout — a frame gap never evicts
+    a *lone* owner (a paused camera / slow first keyframe is legitimate; the
+    caller cancels this task when the pc goes terminal). BUT when another
+    publisher is waiting to take over, an owner that stops delivering frames for
+    >= gap_release_s yields the input (owner_gap_should_release): a dead owner's
+    pc stays 'connected' until ICE consent expiry (~30s), which would otherwise
+    freeze the input while a ready client sits idle."""
+    loop = asyncio.get_running_loop()
     latest = [None]
+    last_recv_t = [loop.time()]  # claim time is t0; a real gap counts from now
     new_frame = asyncio.Event()
     stopped = asyncio.Event()
 
@@ -160,6 +209,7 @@ async def _pump_owner_frames(track, pc, sink: FrameSink, log=None) -> None:
         try:
             while True:
                 latest[0] = await track.recv()
+                last_recv_t[0] = loop.time()
                 new_frame.set()
         except MediaStreamError:
             pass
@@ -173,9 +223,27 @@ async def _pump_owner_frames(track, pc, sink: FrameSink, log=None) -> None:
             new_frame.set()  # wake the processing loop so it can exit
 
     reader = asyncio.ensure_future(_reader())
+    # Poll cadence: wake often enough that a crossed gap is caught within ~1s of
+    # the threshold. A healthy owner wakes on every frame and never hits this
+    # timeout — the poll only matters once frames stop.
+    poll = min(1.0, gap_release_s)
     try:
         while not (stopped.is_set() and latest[0] is None):
-            await new_frame.wait()
+            try:
+                await asyncio.wait_for(new_frame.wait(), timeout=poll)
+            except asyncio.TimeoutError:
+                gap = loop.time() - last_recv_t[0]
+                if owner_gap_should_release(
+                    gap, ownership.num_other_waiters(pc), gap_release_s
+                ):
+                    if log:
+                        log.info(
+                            "Owner %x silent %.1fs with a waiter ready — yielding input",
+                            id(pc),
+                            gap,
+                        )
+                    return  # → consume_peer_input finally → release() → handoff
+                continue
             new_frame.clear()
             frame, latest[0] = latest[0], None
             if frame is None:
@@ -196,6 +264,7 @@ async def consume_peer_input(
     notify: Optional[NotifyHook] = None,
     log=None,
     first_frame_deadline: float = WAITER_FIRST_FRAME_DEADLINE,
+    owner_gap_release: float = OWNER_GAP_WITH_WAITER,
 ) -> None:
     """Pull VideoFrames from a remote track and (when this peer owns the input)
     feed them into the pipeline via `sink`. Waits for ownership while draining
@@ -240,7 +309,9 @@ async def consume_peer_input(
         if log:
             log.info("Peer %x (seq %d) now drives input", id(pc), seq)
         notify("claimed", pc)
-        await _pump_owner_frames(track, pc, sink, log=log)
+        await _pump_owner_frames(
+            track, pc, sink, ownership, log=log, gap_release_s=owner_gap_release
+        )
     finally:
         outcome = ownership.release(seq, pc)
         if log and outcome.had_owner:

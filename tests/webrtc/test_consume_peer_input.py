@@ -145,6 +145,75 @@ async def test_oldest_waiter_takes_over_when_owner_releases():
     assert own.num_waiters() == 0  # B's finally released its slot on cancel
 
 
+async def test_owner_gap_with_waiter_yields_input():
+    # Owner A stops delivering frames while publisher B waits. A must yield within
+    # ~the gap so B takes over — NOT wait out ICE consent expiry (~30s). This is
+    # the fast dead-owner path (V3).
+    own = InputOwnership(has_server_camera=False)
+    a_track = FakeTrack(frames=["a1"], ends=False)  # one frame, then silent forever
+    pc_a = FakePC("connected")
+    got, sink = _sink_recorder()
+    task_a = asyncio.ensure_future(
+        consume_peer_input(a_track, pc_a, own, sink, owner_gap_release=0.2)
+    )
+    await asyncio.wait_for(_wait(lambda: own.owner_is(pc_a)), timeout=2)
+
+    # B registers as a ready takeover candidate.
+    pc_b = FakePC("connected")
+    sb = own.register_waiter(pc_b)
+
+    # A silent > gap with B waiting → A yields; its task finishes and releases.
+    await asyncio.wait_for(task_a, timeout=2)
+    assert not own.owner_is(pc_a)
+    # B is now the oldest remaining waiter and can claim.
+    assert own.try_claim(sb, pc_b) is True
+
+
+async def test_owner_gap_no_waiter_holds():
+    # A lone owner is NEVER gap-evicted, no matter how long the gap (V2 / c855950).
+    own = InputOwnership(has_server_camera=False)
+    a_track = FakeTrack(frames=["a1"], ends=False)  # one frame, then silent forever
+    pc_a = FakePC("connected")
+    got, sink = _sink_recorder()
+    task = asyncio.ensure_future(
+        consume_peer_input(a_track, pc_a, own, sink, owner_gap_release=0.2)
+    )
+    await asyncio.wait_for(_wait(lambda: own.owner_is(pc_a)), timeout=2)
+
+    await asyncio.sleep(0.6)  # 3x the gap, but no other waiter exists
+    assert own.owner_is(pc_a) is True
+    assert not task.done()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+async def test_owner_delivering_frames_with_waiter_not_evicted():
+    # An owner still delivering frames is never yielded, even with a waiter present
+    # — the gap policy keys on a receive GAP, not on the mere presence of a waiter
+    # (V5).
+    own = InputOwnership(has_server_camera=False)
+    a_track = FakeTrack(frames=[f"a{i}" for i in range(200)], gap=0.02, ends=False)
+    pc_a = FakePC("connected")
+    got, sink = _sink_recorder()
+    task = asyncio.ensure_future(
+        consume_peer_input(a_track, pc_a, own, sink, owner_gap_release=0.2)
+    )
+    await asyncio.wait_for(_wait(lambda: own.owner_is(pc_a)), timeout=2)
+
+    pc_b = FakePC("connected")
+    own.register_waiter(pc_b)  # waiter present the whole time
+
+    await asyncio.sleep(0.6)  # 3x the gap, but A keeps delivering (0.02s << 0.2s)
+    assert own.owner_is(pc_a) is True
+    assert len(got) > 5
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
 async def _wait(pred, interval=0.01):
     while not pred():
         await asyncio.sleep(interval)

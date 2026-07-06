@@ -3,11 +3,55 @@
 No aiortc / FastAPI / GPU. `pc` is any object identity.
 """
 
-from fluxrt.webrtc.input_ownership import InputOwnership
+import pytest
+
+from fluxrt.webrtc.input_ownership import (
+    OWNER_GAP_WITH_WAITER,
+    InputOwnership,
+    owner_gap_should_release,
+)
 
 
 def _pc(name):
     return type("PC", (), {"name": name})()
+
+
+@pytest.mark.parametrize(
+    "gap,others,expect",
+    [
+        (OWNER_GAP_WITH_WAITER, 1, True),       # exactly at threshold, waiter → yield
+        (OWNER_GAP_WITH_WAITER + 0.1, 2, True), # past threshold, multiple waiters
+        (OWNER_GAP_WITH_WAITER - 0.1, 1, False),# below threshold → keep
+        (1000.0, 0, False),                     # huge gap but NO waiter → keep (c855950-safe)
+        (0.0, 1, False),                        # waiter but no gap yet → keep
+    ],
+)
+def test_owner_gap_should_release(gap, others, expect):
+    assert owner_gap_should_release(gap, others) is expect
+
+
+@pytest.mark.parametrize(
+    "gap,others,threshold,expect",
+    [
+        (0.2, 1, 0.2, True),   # injected threshold (test-speed) honored
+        (0.1, 1, 0.2, False),  # below injected threshold
+        (100.0, 0, 0.2, False),# no waiter → keep regardless of threshold
+    ],
+)
+def test_owner_gap_should_release_custom_threshold(gap, others, threshold, expect):
+    assert owner_gap_should_release(gap, others, threshold) is expect
+
+
+def test_num_other_waiters_excludes_self():
+    own = InputOwnership()
+    a, b, c = _pc("a"), _pc("b"), _pc("c")
+    sa = own.register_waiter(a)
+    own.try_claim(sa, a)  # a owns but stays registered in _waiters
+    own.register_waiter(b)
+    own.register_waiter(c)
+    assert own.num_other_waiters(a) == 2  # b, c — a excludes itself
+    assert own.num_other_waiters(b) == 2  # a (owner), c
+    assert own.num_other_waiters(_pc("unknown")) == 3  # all three
 
 
 def test_single_peer_claims_and_activates():

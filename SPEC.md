@@ -44,9 +44,9 @@ T2|x|`InputOwnership.num_other_waiters(pc)` under lock|V3,C1
 T3|x|`_pump_owner_frames`: gap supervision → policy fire → return (release via existing finally)|V3,C2
 T4|x|server tests: gap+waiter evicts & handoff; gap no-waiter holds; frame-delivering owner + waiter never evicted|V2,V3,V5
 T5|x|`run_webrtc.py` comment fix re aiortc states (no behavior change)|R2
-T6|.|`engineSession.ts`: 3s disconnected-grace + connectionstatechange 'failed' → retry|V6
-T7|.|`engineSession.ts`: `ch.onmessage` → decodeCtrl → per-clip role|V7,C4
-T8|.|client vitest: grace cancel/expiry/closed-halt; ctrl dispatch (fake RTCPeerConnection + fake timers)|V6,V7
+T6|x|`engineSession.ts`: 3s disconnected-grace + connectionstatechange 'failed' → retry|V6
+T7|x|`engineSession.ts`: `ch.onmessage` → decodeCtrl → per-clip role|V7,C4
+T8|x|client vitest: grace cancel/expiry/closed-halt; ctrl dispatch (fake RTCPeerConnection + fake timers)|V6,V7
 
 ## §B BUGS
 id|date|cause|fix

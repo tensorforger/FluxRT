@@ -148,7 +148,8 @@ async def test_oldest_waiter_takes_over_when_owner_releases():
 async def test_owner_gap_with_waiter_yields_input():
     # Owner A stops delivering frames while publisher B waits. A must yield within
     # ~the gap so B takes over — NOT wait out ICE consent expiry (~30s). This is
-    # the fast dead-owner path (V3).
+    # the fast dead-owner path (V3). A's task does NOT finish: it rejoins as the
+    # newest waiter (drains its track, can reclaim later — V9).
     own = InputOwnership(has_server_camera=False)
     a_track = FakeTrack(frames=["a1"], ends=False)  # one frame, then silent forever
     pc_a = FakePC("connected")
@@ -162,11 +163,43 @@ async def test_owner_gap_with_waiter_yields_input():
     pc_b = FakePC("connected")
     sb = own.register_waiter(pc_b)
 
-    # A silent > gap with B waiting → A yields; its task finishes and releases.
-    await asyncio.wait_for(task_a, timeout=2)
-    assert not own.owner_is(pc_a)
+    # A silent > gap with B waiting → A yields ownership.
+    await asyncio.wait_for(_wait(lambda: not own.owner_is(pc_a)), timeout=2)
     # B is now the oldest remaining waiter and can claim.
     assert own.try_claim(sb, pc_b) is True
+    # A rejoined as a waiter — still draining, not done (V9).
+    assert not task_a.done()
+    assert own.num_waiters() == 2  # B (owner) + rejoined A
+
+    task_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_a
+
+
+async def test_yielded_owner_reclaims_when_slot_frees():
+    # V9: after a gap-yield, the ex-owner sits as a waiter; when the new owner
+    # leaves and no one else waits, it reclaims (within ~its 1s claim poll).
+    own = InputOwnership(has_server_camera=False)
+    a_track = FakeTrack(frames=["a1"], ends=False)  # one frame, then silent forever
+    pc_a = FakePC("connected")
+    got, sink = _sink_recorder()
+    task_a = asyncio.ensure_future(
+        consume_peer_input(a_track, pc_a, own, sink, owner_gap_release=0.2)
+    )
+    await asyncio.wait_for(_wait(lambda: own.owner_is(pc_a)), timeout=2)
+
+    pc_b = FakePC("connected")
+    sb = own.register_waiter(pc_b)
+    await asyncio.wait_for(_wait(lambda: not own.owner_is(pc_a)), timeout=2)
+    assert own.try_claim(sb, pc_b) is True  # B takes over
+
+    own.release(sb, pc_b)  # B leaves — slot free, rejoined A is the only waiter
+    await asyncio.wait_for(_wait(lambda: own.owner_is(pc_a)), timeout=3)
+    assert not task_a.done()
+
+    task_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task_a
 
 
 async def test_owner_gap_no_waiter_holds():

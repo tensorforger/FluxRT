@@ -21,7 +21,10 @@ recv POLICY (this is the bug class that regressed in c855950):
   (owner_gap_should_release). This is NOT the c855950 blind evict — it fires
   only when a takeover candidate exists, bounding a dead owner's freeze (abrupt
   network loss keeps the pc 'connected' until ICE consent expiry ~30s) instead
-  of frozen output while a ready client sits idle.
+  of frozen output while a ready client sits idle. The yielded peer rejoins as
+  the NEWEST waiter: its track keeps being drained (aiortc decodes inbound RTP
+  into an unbounded queue whether or not anyone recv()s) and it can reclaim
+  when the slot frees.
 - A WAITER is bounded only on its FIRST frame: a peer that never delivers a frame
   AND is not in the 'connected' ICE state is a dead reconnect and is dropped after
   WAITER_FIRST_FRAME_DEADLINE. Once it has delivered a frame, it is never evicted
@@ -58,6 +61,12 @@ WAITER_FIRST_FRAME_DEADLINE = 25.0
 # CONSENT_INTERVAL=5 * CONSENT_FAILURES=6 ≈ 25-35s), which would freeze the input
 # that whole time even though a ready client is queued. This bounds the freeze to
 # ~this gap when a takeover candidate exists.
+#
+# Accepted limitation: a waiter whose network just died still counts as a
+# candidate (its state stays 'connected' until consent expiry), so a paused
+# owner can yield to a corpse. Self-healing: the yielded owner rejoins as a
+# waiter, so the corpse — silent, with a waiter present — gap-yields right back
+# within this same threshold (or consent-expires), returning the input.
 OWNER_GAP_WITH_WAITER = 8.0
 
 
@@ -183,11 +192,11 @@ async def _pump_owner_frames(
     track,
     pc,
     sink: FrameSink,
-    ownership: "InputOwnership",
+    ownership: InputOwnership,
     *,
     log=None,
     gap_release_s: float = OWNER_GAP_WITH_WAITER,
-) -> None:
+) -> bool:
     """Drain-to-latest: a reader task always overwrites `latest`, the processing
     loop drives only the newest frame. Bounds round-trip lag and memory when the
     pipeline is slower than the peer camera.
@@ -198,7 +207,11 @@ async def _pump_owner_frames(
     publisher is waiting to take over, an owner that stops delivering frames for
     >= gap_release_s yields the input (owner_gap_should_release): a dead owner's
     pc stays 'connected' until ICE consent expiry (~30s), which would otherwise
-    freeze the input while a ready client sits idle."""
+    freeze the input while a ready client sits idle.
+
+    Returns True on a gap-yield (pc may still be alive — the caller MUST keep
+    draining the track and may re-register as a waiter), False when the track
+    ended/errored."""
     loop = asyncio.get_running_loop()
     latest = [None]
     last_recv_t = [loop.time()]  # claim time is t0; a real gap counts from now
@@ -242,13 +255,14 @@ async def _pump_owner_frames(
                             id(pc),
                             gap,
                         )
-                    return  # → consume_peer_input finally → release() → handoff
+                    return True  # caller releases → handoff, then rejoins as waiter
                 continue
             new_frame.clear()
             frame, latest[0] = latest[0], None
             if frame is None:
                 continue
             await sink(frame)
+        return False  # track ended
     finally:
         reader.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -268,52 +282,68 @@ async def consume_peer_input(
 ) -> None:
     """Pull VideoFrames from a remote track and (when this peer owns the input)
     feed them into the pipeline via `sink`. Waits for ownership while draining
-    its track view-only; the oldest waiter takes over on release."""
+    its track view-only; the oldest waiter takes over on release. A gap-yielded
+    owner (silent with a waiter ready) rejoins as the NEWEST waiter and keeps
+    draining — never leave an alive track unconsumed (aiortc decodes inbound RTP
+    into an unbounded queue regardless), and it can reclaim when the slot frees."""
     notify = notify or (lambda *a, **k: None)
     loop = asyncio.get_running_loop()
-    seq = ownership.register_waiter(pc)
 
-    try:
-        # ── wait for ownership, draining frames so the inbound queue can't grow ──
-        got_first_frame = False
-        deadline = loop.time() + first_frame_deadline
-        announced_waiting = False
-        while not ownership.try_claim(seq, pc):
-            if not announced_waiting:
-                announced_waiting = True
-                if log:
-                    log.info("Peer %x (seq %d) waiting — view-only", id(pc), seq)
-            if got_first_frame:
-                # Delivered a frame already: a real, connected view-only peer.
-                # Block (never gap-evict); death is handled by the caller's
-                # connectionstatechange -> task cancel.
+    while True:
+        seq = ownership.register_waiter(pc)
+        yielded = False
+        try:
+            # ── wait for ownership, draining frames so the inbound queue can't grow ──
+            got_first_frame = False
+            deadline = loop.time() + first_frame_deadline
+            announced_waiting = False
+            while not ownership.try_claim(seq, pc):
+                if not announced_waiting:
+                    announced_waiting = True
+                    if log:
+                        log.info("Peer %x (seq %d) waiting — view-only", id(pc), seq)
+                if got_first_frame:
+                    # Delivered a frame already: a real, connected view-only peer.
+                    # Never gap-evicted; the 1s timeout only re-checks the claim so
+                    # a stalled-track waiter still takes over when the slot frees.
+                    # Death is handled by the caller's connectionstatechange ->
+                    # task cancel.
+                    try:
+                        await asyncio.wait_for(track.recv(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+                    except MediaStreamError:
+                        return
+                    continue
+                remaining = deadline - loop.time()
+                if waiter_should_evict(_conn_state(pc), got_first_frame, remaining <= 0):
+                    if log:
+                        log.info("Peer %x (seq %d) never connected — dropping", id(pc), seq)
+                    return
                 try:
-                    await track.recv()
+                    # 1s cap = claim re-check cadence for a silent waiter; the
+                    # first-frame DEADLINE (eviction) is enforced by `remaining`
+                    # above, not by this timeout.
+                    await asyncio.wait_for(track.recv(), timeout=1.0)
+                    got_first_frame = True
+                except asyncio.TimeoutError:
+                    continue  # re-check claim + liveness; do NOT evict a connected peer
                 except MediaStreamError:
                     return
-                continue
-            remaining = deadline - loop.time()
-            if waiter_should_evict(_conn_state(pc), got_first_frame, remaining <= 0):
-                if log:
-                    log.info("Peer %x (seq %d) never connected — dropping", id(pc), seq)
-                return
-            try:
-                await asyncio.wait_for(track.recv(), timeout=max(1.0, remaining))
-                got_first_frame = True
-            except asyncio.TimeoutError:
-                continue  # re-check claim + liveness; do NOT evict a connected peer
-            except MediaStreamError:
-                return
 
-        # ── now the owner ──
+            # ── now the owner ──
+            if log:
+                log.info("Peer %x (seq %d) now drives input", id(pc), seq)
+            notify("claimed", pc)
+            yielded = await _pump_owner_frames(
+                track, pc, sink, ownership, log=log, gap_release_s=owner_gap_release
+            )
+        finally:
+            outcome = ownership.release(seq, pc)
+            if log and outcome.had_owner:
+                log.info("Peer %x (seq %d) released input", id(pc), seq)
+            notify("released", pc, outcome)
+        if not yielded:
+            return
         if log:
-            log.info("Peer %x (seq %d) now drives input", id(pc), seq)
-        notify("claimed", pc)
-        await _pump_owner_frames(
-            track, pc, sink, ownership, log=log, gap_release_s=owner_gap_release
-        )
-    finally:
-        outcome = ownership.release(seq, pc)
-        if log and outcome.had_owner:
-            log.info("Peer %x (seq %d) released input", id(pc), seq)
-        notify("released", pc, outcome)
+            log.info("Peer %x rejoining as waiter after gap-yield", id(pc))

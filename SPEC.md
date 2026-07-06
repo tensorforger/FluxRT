@@ -30,12 +30,13 @@ R4|browser side|'disconnected' transient, may self-heal; escalation to 'failed' 
 ## §V INVARIANTS
 V1: ∀ time ≤1 owner (existing machine + tests)
 V2: owner w/ 0 other waiters ⊥ gap-evicted — holds slot until terminal state / consent expiry backstop
-V3: owner silent ≥ OWNER_GAP_WITH_WAITER & ≥1 other waiter → released; oldest waiter claims on its next frame
+V3: owner silent ≥ OWNER_GAP_WITH_WAITER & ≥1 other waiter → released ≤ threshold+poll(1s)+claim(≤1s) ≈ 10s worst; oldest waiter claims on its next frame
 V4: handoff msgs: `input:you` → new owner only; `input:peer` broadcast (existing _input_notify path)
 V5: waiter first-frame policy unchanged (WAITER_FIRST_FRAME_DEADLINE 25s, connected-waiter never evicted)
 V6: client engine: 'disconnected' recovers ≤3s → same pc kept, ⊥ renegotiation; expires → teardown+retry w/ backoff; `closed=true` halts all retry
 V7: client engine: inbound ctrl decoded; unknown msg → ignored, ⊥ throw; inputRole surfaced per clip
 V8: `webrtc_test_client.html` connects & functions unmodified
+V9: gap-yielded peer (pc alive) ! keep draining its track (aiortc decodes inbound RTP → unbounded queue) & rejoins as newest waiter ∴ can reclaim when slot frees; ⊥ alive undrained track
 
 ## §T TASKS
 id|status|task|cites
@@ -50,3 +51,4 @@ T8|x|client vitest: grace cancel/expiry/closed-halt; ctrl dispatch (fake RTCPeer
 
 ## §B BUGS
 id|date|cause|fix
+B1|2026-07-06|gap-yield `return`ed w/ pc alive → nobody drains track; aiortc decodes regardless → queue grows ~12MB/s if paused cam resumes (caught in review, pre-merge)|V9
